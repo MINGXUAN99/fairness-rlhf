@@ -1,0 +1,47 @@
+# Python
+venv/
+.Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Training outputs
+trainer_output/
+wandb/
+logs/
+calibration/
+*.log
+
+# Model weights (if saved locally)
+*.pt
+*.pth
+*.safetensors
+pytorch_model*.bin
+
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Development
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# OS
+.DS_Store
+*.Zone.Identifier
+Thumbs.db
