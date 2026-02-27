@@ -17,7 +17,7 @@ try:
 except ImportError:
     trl_experimental_utils = None
 
-from trl import PPOConfig, PPOTrainer
+from trl.experimental.ppo import PPOConfig, PPOTrainer
 from transformers import TrainerCallback
 from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
@@ -63,6 +63,46 @@ def _safe_masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bo
 
 _experimental_ppo_module.masked_var = _safe_masked_var
 _experimental_ppo_module.masked_whiten = _safe_masked_whiten
+
+# ---------------------------------------------------------------------------
+# Monkey-patch PPOTrainer.train to use mean KL per token (KL / token length)
+# instead of the sum of all tokens. This makes the KL penalty length-invariant.
+# ---------------------------------------------------------------------------
+import inspect
+import textwrap
+
+
+def _patch_ppo_kl_to_mean_per_token():
+    """Patch PPOTrainer.train to use mean KL per token."""
+    try:
+        source = inspect.getsource(_experimental_ppo_module.PPOTrainer.train)
+    except (TypeError, OSError):
+        # Source unavailable (e.g. C extension or restricted)
+        return
+
+    # Replace: non_score_reward = -args.kl_coef * kl
+    # with mean-per-token version (match indentation from getsource: 16 spaces at this block level)
+    old_kl_block = "non_score_reward = -args.kl_coef * kl"
+    new_kl_block = (
+        "# Use mean KL per token (original KL / token length) instead of sum of all tokens\n"
+        "                kl_mean_per_seq = kl.sum(1) / sequence_lengths_p1.clamp(min=1)\n"
+        "                non_score_reward = -args.kl_coef * kl_mean_per_seq.unsqueeze(1).expand_as(kl)"
+    )
+    if old_kl_block in source and new_kl_block not in source:
+        source = source.replace(old_kl_block, new_kl_block)
+        # Replace: mean_kl = kl.sum(1).mean()
+        source = source.replace("mean_kl = kl.sum(1).mean()", "mean_kl = kl_mean_per_seq.mean()")
+        # Dedent so exec works at module level (getsource returns class-indented code)
+        source = textwrap.dedent(source)
+        # Compile in the module's namespace so all names resolve
+        globals_dict = _experimental_ppo_module.__dict__
+        exec(compile(source, "<patched_ppo_train>", "exec"), globals_dict)
+        # exec creates a function named 'train' in the compiled block
+        patched_train = globals_dict["train"]
+        _experimental_ppo_module.PPOTrainer.train = patched_train
+
+
+_patch_ppo_kl_to_mean_per_token()
 
 # Shared state for tracking which group is selected as worst during MaxMin/SharedRep PPO.
 # Written by custom get_reward functions, read by GroupSelectionCallback.
