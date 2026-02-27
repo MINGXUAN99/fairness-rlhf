@@ -19,6 +19,10 @@ def parse_args():
     parser.add_argument("--proportion", type=float, required=True, help="Proportions of helpful and harmless responses.")
     parser.add_argument("--alpha", type=float, required=True, help="Alpha value for the scores (0.5-1.0).")
     parser.add_argument("--k", type=int, required=True, help="Inner hidden dimension size.")
+    parser.add_argument("--hub_model_id", type=str, required=True,
+                        help="Hugging Face hub model id for pushing the trained reward model (e.g. {user_id}/sharedrep-imdb-reward-ALPHA1.0-len512-k64).")
+    parser.add_argument("--model_hub_id", type=str, default="gpt2",
+                        help="Hugging Face model id for the backbone (e.g. gpt2, lvwerra/gpt2-imdb). Default: gpt2.")
     return parser.parse_args()
 
 
@@ -45,16 +49,16 @@ if __name__ == "__main__":
     # Reward Params
     n_groups=2
     use_tanh = True
-    model_name = "lvwerra/gpt2-imdb"
+    backbone_model_id = args.model_hub_id
     freeze_backbone = True
-    model_hub_id = f"{user_id}/sharedrep-imdb-reward-prop{proportion}-alpha{alpha}-seed{seed}-k{k}"
+    output_hub_id = args.hub_model_id
     
     # Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(backbone_model_id)
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token  
 
     # Reward Model
-    model = SharedRepGPT2RM.from_pretrained(model_name, k=k, n_heads=n_groups)
+    model = SharedRepGPT2RM.from_pretrained(backbone_model_id, k=k, n_heads=n_groups)
     model.disable_maxmin()
     if freeze_backbone: model.freeze_backbone()
     model.unfreeze_heads()
@@ -71,15 +75,15 @@ if __name__ == "__main__":
     training_args = RewardConfig(
         per_device_train_batch_size=16,
         learning_rate=5e-4,
-        num_train_epochs=3,
+        num_train_epochs=4,
         logging_steps=10,
         eval_strategy="steps",
         eval_steps=100,  # Reduced evaluation frequency to save time (was missing, default was too frequent)
         save_strategy="no",
         report_to=["wandb"],
-        run_name=model_hub_id,
+        run_name=output_hub_id,
         push_to_hub=True,
-        hub_model_id=model_hub_id,
+        hub_model_id=output_hub_id,
         hub_private_repo=True,
     )
 

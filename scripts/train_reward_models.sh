@@ -80,6 +80,9 @@ fi
 # Alpha values configuration
 ALPHAS="${ALPHAS:-1.0}"  # Alpha values to train
 
+# Reward model backbone
+REWARD_MODEL_BASE="${REWARD_MODEL_BASE:-Qwen/Qwen3-0.6B-Base}"
+
 # Skip flags (set to non-empty to skip, e.g. SKIP_TRAIN=1 or SKIP_NORM=1)
 SKIP_TRAIN="${SKIP_TRAIN:-}"
 SKIP_NORM="${SKIP_NORM:-}"
@@ -92,6 +95,7 @@ echo "Proportion:      $PROPORTION"
 echo "NUM_RESPONSES:   $NUM_RESPONSES"
 echo "MAX_NEW_TOKENS:  $MAX_NEW_TOKENS"
 echo "Alphas:          $ALPHAS"
+echo "Reward model:    $REWARD_MODEL_BASE"
 echo "K (SharedRep):   $K"
 echo "Python:          $PYTHON"
 echo "SKIP_TRAIN:      ${SKIP_TRAIN:-0}"
@@ -141,13 +145,13 @@ for ALPHA in $ALPHAS; do
     MODEL_COUNTER=$((MODEL_COUNTER + 1))
     PREFERENCE_EXP_TAG="ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random"
     PREFERENCE_DATASET_HUB_ID="${USER_ID}/gpt2-imdb-preference-${PREFERENCE_EXP_TAG}"
-    VANILLA_REWARD_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}"
+    VANILLA_REWARD_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-qwen06b"
     
     echo ""
     echo "────────────────────────────────────────────────────────────────"
     echo "📊 [$MODEL_COUNTER/$TOTAL_MODELS] Vanilla - Alpha=$ALPHA ($ALPHA_COUNTER/$TOTAL_ALPHAS)"
     echo "────────────────────────────────────────────────────────────────"
-    echo "Architecture: Single GPT-2 → Linear → Reward"
+    echo "Architecture: Single $REWARD_MODEL_BASE → Linear → Reward"
     echo "Preference dataset: $PREFERENCE_DATASET_HUB_ID"
     echo "Hub model id:       $VANILLA_REWARD_HUB_ID"
     
@@ -158,7 +162,8 @@ for ALPHA in $ALPHAS; do
             --proportion "$PROPORTION" \
             --alpha "$ALPHA" \
             --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" \
-            --hub_model_id "$VANILLA_REWARD_HUB_ID"
+            --hub_model_id "$VANILLA_REWARD_HUB_ID" \
+            --model_hub_id "$REWARD_MODEL_BASE"
         echo "✅ Vanilla model (alpha=$ALPHA) training complete"
     else
         echo "⏭️  Vanilla model (alpha=$ALPHA) training skipped (SKIP_TRAIN)"
@@ -182,13 +187,13 @@ for ALPHA in $ALPHAS; do
     MODEL_COUNTER=$((MODEL_COUNTER + 1))
     PREFERENCE_EXP_TAG="ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random"
     PREFERENCE_DATASET_HUB_ID="${USER_ID}/gpt2-imdb-preference-${PREFERENCE_EXP_TAG}"
-    MAXMIN_REWARD_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority"
+    MAXMIN_REWARD_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-qwen06b"
     
     echo ""
     echo "────────────────────────────────────────────────────────────────"
     echo "📊 [$MODEL_COUNTER/$TOTAL_MODELS] MaxMin-Minority - Alpha=$ALPHA ($ALPHA_COUNTER/$TOTAL_ALPHAS)"
     echo "────────────────────────────────────────────────────────────────"
-    echo "Architecture: Separate GPT-2 → Linear → Reward (for minority)"
+    echo "Architecture: Separate $REWARD_MODEL_BASE → Linear → Reward (for minority)"
     echo "Preference dataset: $PREFERENCE_DATASET_HUB_ID"
     echo "Hub model id:       $MAXMIN_REWARD_HUB_ID"
     
@@ -200,7 +205,8 @@ for ALPHA in $ALPHAS; do
             --alpha "$ALPHA" \
             --group 0 \
             --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" \
-            --hub_model_id "$MAXMIN_REWARD_HUB_ID"
+            --hub_model_id "$MAXMIN_REWARD_HUB_ID" \
+            --model_hub_id "$REWARD_MODEL_BASE"
         echo "✅ MaxMin minority model (alpha=$ALPHA) training complete"
     else
         echo "⏭️  MaxMin minority model (alpha=$ALPHA) training skipped (SKIP_TRAIN)"
@@ -224,13 +230,13 @@ for ALPHA in $ALPHAS; do
     MODEL_COUNTER=$((MODEL_COUNTER + 1))
     PREFERENCE_EXP_TAG="ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random"
     PREFERENCE_DATASET_HUB_ID="${USER_ID}/gpt2-imdb-preference-${PREFERENCE_EXP_TAG}"
-    MAXMIN_REWARD_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority"
+    MAXMIN_REWARD_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-qwen06b"
     
     echo ""
     echo "────────────────────────────────────────────────────────────────"
     echo "📊 [$MODEL_COUNTER/$TOTAL_MODELS] MaxMin-Majority - Alpha=$ALPHA ($ALPHA_COUNTER/$TOTAL_ALPHAS)"
     echo "────────────────────────────────────────────────────────────────"
-    echo "Architecture: Separate GPT-2 → Linear → Reward (for majority)"
+    echo "Architecture: Separate $REWARD_MODEL_BASE → Linear → Reward (for majority)"
     echo "Preference dataset: $PREFERENCE_DATASET_HUB_ID"
     echo "Hub model id:       $MAXMIN_REWARD_HUB_ID"
     
@@ -242,7 +248,8 @@ for ALPHA in $ALPHAS; do
             --alpha "$ALPHA" \
             --group 1 \
             --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" \
-            --hub_model_id "$MAXMIN_REWARD_HUB_ID"
+            --hub_model_id "$MAXMIN_REWARD_HUB_ID" \
+            --model_hub_id "$REWARD_MODEL_BASE"
         echo "✅ MaxMin majority model (alpha=$ALPHA) training complete"
     else
         echo "⏭️  MaxMin majority model (alpha=$ALPHA) training skipped (SKIP_TRAIN)"
@@ -276,6 +283,7 @@ for ALPHA in $ALPHAS; do
     echo "📐 Normalization for preference dataset: $PREFERENCE_DATASET_HUB_ID"
     echo "────────────────────────────────────────────────────────────────"
     
+    VANILLA_REWARD_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-qwen06b"
     echo "  Vanilla RM z-score..."
     "$PYTHON" src/imdb/reward_training/normalize_reward_model.py \
         --rm_type vanilla \
@@ -284,17 +292,15 @@ for ALPHA in $ALPHAS; do
         --proportion "$PROPORTION" \
         --alpha "$ALPHA" \
         --max_new_tokens "$MAX_NEW_TOKENS" \
-        --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID"
+        --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" \
+        --vanilla_hub_model_id "$VANILLA_REWARD_HUB_ID"
     
-    echo "  MaxMin RM z-score (minority + majority)..."
-    "$PYTHON" src/imdb/reward_training/normalize_reward_model.py \
-        --rm_type maxmin \
-        --user_id "$USER_ID" \
-        --seed "$SEED" \
-        --proportion "$PROPORTION" \
-        --alpha "$ALPHA" \
-        --max_new_tokens "$MAX_NEW_TOKENS" \
-        --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID"
+    MAXMIN_MINORITY_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-qwen06b"
+    MAXMIN_MAJORITY_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-qwen06b"
+    echo "  MaxMin RM z-score (minority + majority)${MAXMIN_UNIFIED:+ [unified scale]}..."
+    MAXMIN_NORM_ARGS=(--rm_type maxmin --user_id "$USER_ID" --seed "$SEED" --proportion "$PROPORTION" --alpha "$ALPHA" --max_new_tokens "$MAX_NEW_TOKENS" --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" --maxmin_minority_hub_model_id "$MAXMIN_MINORITY_HUB_ID" --maxmin_majority_hub_model_id "$MAXMIN_MAJORITY_HUB_ID")
+    [ -n "${MAXMIN_UNIFIED:-}" ] && MAXMIN_NORM_ARGS+=(--maxmin_unified)
+    "$PYTHON" src/imdb/reward_training/normalize_reward_model.py "${MAXMIN_NORM_ARGS[@]}"
     
     NORM_COUNTER=$((NORM_COUNTER + 1))
     echo "✅ Normalization for alpha=$ALPHA complete"
@@ -323,9 +329,9 @@ echo "Models on HuggingFace Hub (naming aligned with build_dataset):"
 echo ""
 for ALPHA in $ALPHAS; do
     echo "Alpha = $ALPHA (preference: ${USER_ID}/gpt2-imdb-preference-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random):"
-    echo "  • Vanilla:   ${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}"
-    echo "  • MaxMin-0:  ${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority"
-    echo "  • MaxMin-1:  ${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority"
+    echo "  • Vanilla:   ${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-qwen06b"
+    echo "  • MaxMin-0:  ${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-qwen06b"
+    echo "  • MaxMin-1:  ${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-qwen06b"
     echo ""
 done
 echo "════════════════════════════════════════════════════════════════"

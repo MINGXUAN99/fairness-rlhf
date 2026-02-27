@@ -56,6 +56,8 @@ def parse_args():
                         help="Hidden dimension (evaluation mode, required for sharedrep)")
     parser.add_argument("--alpha", type=float, default=1.0,
                         help="Alpha value (evaluation mode, default: 1.0)")
+    parser.add_argument("--policy_hub_id", type=str, default=None,
+                        help="Override policy/eval dataset hub ID (evaluation mode). If set, load eval responses from the dataset derived from this (policy hub id with -ppo- -> -ppo-eval-).")
     
     return parser.parse_args()
 
@@ -83,6 +85,8 @@ def get_dataset_info(args):
     if args.mode == "dataset":
         return args.dataset_hub_id or f"{args.user_id}/gpt2-imdb-raw"
     else:  # evaluation
+        if args.policy_hub_id:
+            return args.policy_hub_id.replace("-ppo-", "-ppo-eval-", 1)
         if args.method == "gold":
             # Gold uses alpha (defines group preferences for MaxMin objective)
             return f"{args.user_id}/{args.method}-imdb-ppo-eval-alpha{args.alpha}-seed{args.seed}"

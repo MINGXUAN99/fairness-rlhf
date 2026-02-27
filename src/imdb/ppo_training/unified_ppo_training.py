@@ -659,24 +659,45 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--no_reward_normalization",
+        action="store_true",
+        help="Disable reward normalization even when calibration JSON exists. Use raw RM logits for MaxMin/vanilla PPO.",
+    )
+    parser.add_argument(
         "--max_new_tokens",
         type=int,
         default=512,
         help="Max new tokens used for reward model/dataset naming (default 512). Must match train_reward_models/build_dataset.",
     )
+    parser.add_argument("--vanilla_rm_hub_id", type=str, default=None,
+                        help="Override vanilla reward model hub ID (e.g. {user}/vanilla-imdb-reward-ALPHA1.0-len512-gpt2).")
+    parser.add_argument("--maxmin_minority_rm_hub_id", type=str, default=None,
+                        help="Override MaxMin minority reward model hub ID.")
+    parser.add_argument("--maxmin_majority_rm_hub_id", type=str, default=None,
+                        help="Override MaxMin majority reward model hub ID.")
+    parser.add_argument("--sharedrep_rm_hub_id", type=str, default=None,
+                        help="Override SharedRep reward model hub ID.")
+    parser.add_argument("--policy_model_name", type=str, default="gpt2",
+                        help="Base model for policy/ref/value (default: gpt2). Use 'gpt2' to train from raw GPT-2, or 'lvwerra/gpt2-imdb' for IMDB-pretrained.")
+    parser.add_argument("--policy_hub_id", type=str, default=None,
+                        help="Override policy hub ID for saving. If omitted, derived from method/user_id/seed/proportion/alpha.")
+    parser.add_argument("--kl_coef", type=float, default=0.1,
+                        help="KL penalty coefficient (default 0.1). Set to 0 for ablation (no KL penalty; may cause policy collapse).")
     return parser.parse_args()
 
 
-def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_new_tokens=512):
+def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_new_tokens=512,
+                      vanilla_rm_hub_id=None, maxmin_minority_rm_hub_id=None, maxmin_majority_rm_hub_id=None, sharedrep_rm_hub_id=None):
     """Load and configure the reward model based on the selected method.
     Returns (reward_model, reward_tokenizer, hub_id_or_ids).
     hub_id_or_ids: for vanilla a str (RM hub id); for maxmin a dict {"minority": id, "majority": id}; else None.
+    Optional *_rm_hub_id args override the default constructed hub IDs.
     """
     if method == "sharedrep":
         if proportion is None or k is None:
             raise ValueError("--proportion and --k are required for sharedrep method")
         
-        reward_model_name = f"{user_id}/sharedrep-imdb-reward-prop{proportion}-alpha{alpha}-seed{seed}-k{k}"
+        reward_model_name = sharedrep_rm_hub_id or f"{user_id}/sharedrep-imdb-reward-prop{proportion}-alpha{alpha}-seed{seed}-k{k}"
         reward_model = SharedRepGPT2RM.from_pretrained(reward_model_name)
         reward_model.enable_maxmin()
         reward_model.eval()
@@ -694,13 +715,13 @@ def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_n
             raise ValueError("--proportion is required for maxmin method")
         
         # Naming aligned with train_reward_models / normalize_reward_model (ALPHA-len, no seed in hub id)
-        reward_model_name_majority = f"{user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-majority"
+        reward_model_name_majority = maxmin_majority_rm_hub_id or f"{user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-majority-gpt2"
         reward_model_majority = AutoModelForSequenceClassification.from_pretrained(reward_model_name_majority)
         reward_model_majority.eval()
         fc_maj = reward_model_majority.score
         del reward_model_majority
         
-        reward_model_name_minority = f"{user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-minority"
+        reward_model_name_minority = maxmin_minority_rm_hub_id or f"{user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-minority-gpt2"
         reward_model = AutoModelForSequenceClassification.from_pretrained(reward_model_name_minority)
         reward_model.eval()
         fc_min = reward_model.score
@@ -740,7 +761,7 @@ def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_n
         if proportion is None:
             raise ValueError("--proportion is required for vanilla method")
         
-        reward_model_name = f"{user_id}/vanilla-imdb-reward-ALPHA{alpha}-len{max_new_tokens}"
+        reward_model_name = vanilla_rm_hub_id or f"{user_id}/vanilla-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-gpt2"
         reward_model = AutoModelForSequenceClassification.from_pretrained(reward_model_name)
         reward_model.eval()
         reward_model.to(device)
@@ -832,16 +853,34 @@ if __name__ == "__main__":
 
     # Load reward model based on method (returns hub_id_or_ids for normalization lookup)
     reward_model, reward_tokenizer, reward_model_hub_id_or_ids = load_reward_model(
-        method, user_id, seed, proportion, k, alpha, device, max_new_tokens=args.max_new_tokens
+        method, user_id, seed, proportion, k, alpha, device,
+        max_new_tokens=args.max_new_tokens,
+        vanilla_rm_hub_id=args.vanilla_rm_hub_id,
+        maxmin_minority_rm_hub_id=args.maxmin_minority_rm_hub_id,
+        maxmin_majority_rm_hub_id=args.maxmin_majority_rm_hub_id,
+        sharedrep_rm_hub_id=args.sharedrep_rm_hub_id,
     )
-    if args.reward_normalization_json and reward_model_hub_id_or_ids is not None:
+    # Reward normalization: used for maxmin only (vanilla always uses raw RM logits).
+    # Skip if --no_reward_normalization, or if method is vanilla.
+    if (
+        args.reward_normalization_json
+        and reward_model_hub_id_or_ids is not None
+        and not args.no_reward_normalization
+        and method != "vanilla"
+    ):
         load_reward_normalization_json(args.reward_normalization_json, reward_model_hub_id_or_ids)
         if accelerator.is_main_process:
             print(f"Loaded reward normalization (z-score): {args.reward_normalization_json}")
+    elif method == "vanilla" and accelerator.is_main_process:
+        print("Vanilla PPO: reward normalization not used (raw RM logits)")
+    elif args.no_reward_normalization and accelerator.is_main_process:
+        print("Reward normalization disabled (--no_reward_normalization)")
 
-    # Policy Model
-    policy_model_name = "lvwerra/gpt2-imdb"
-    policy_hub_id = get_policy_hub_id(method, user_id, seed, proportion, k, alpha)
+    # Policy Model (default gpt2 = raw, use lvwerra/gpt2-imdb for IMDB-pretrained)
+    policy_model_name = args.policy_model_name
+    if accelerator.is_main_process:
+        print(f"Policy base model: {policy_model_name}")
+    policy_hub_id = args.policy_hub_id or get_policy_hub_id(method, user_id, seed, proportion, k, alpha)
     policy_tokenizer = AutoTokenizer.from_pretrained(policy_model_name, padding_side="left")
     policy_tokenizer.pad_token = policy_tokenizer.eos_token
 
@@ -894,7 +933,7 @@ if __name__ == "__main__":
         total_episodes=50000,
         lr_scheduler_type="cosine",
         stop_token="eos",
-        kl_coef=0.1  
+        kl_coef=args.kl_coef,
     )
 
     # Set up reward function based on method

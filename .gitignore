@@ -45,3 +45,5 @@ coverage.xml
 .DS_Store
 *.Zone.Identifier
 Thumbs.db
+
+.gitconfig

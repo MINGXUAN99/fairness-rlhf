@@ -87,6 +87,7 @@ SEED="${SEED:-42}"
 PROPORTION="${PROPORTION:-0.2}"
 K="${K:-64}"                       # SharedRep inner hidden dimension
 NUM_RESPONSES="${NUM_RESPONSES:-2}" # Responses per prompt for dataset creation
+EVAL_MAX_NEW_TOKENS="${EVAL_MAX_NEW_TOKENS:-128}"  # Max new tokens for evaluation generation (fixed)
 
 # Methods to train and evaluate
 # Options: gold, vanilla, maxmin, sharedrep
@@ -105,6 +106,9 @@ SKIP_EVAL="${SKIP_EVAL:-0}"
 # Useful when some combinations are already trained / evaluated correctly.
 # Example: SKIP_COMBOS="gold:0.5 vanilla:0.5"
 SKIP_COMBOS="${SKIP_COMBOS:-}"
+
+# Set NO_REWARD_NORM=1 to disable reward normalization in PPO (use raw RM logits)
+NO_REWARD_NORM="${NO_REWARD_NORM:-0}"
 
 # Python interpreter
 PYTHON="${PYTHON:-python3}"
@@ -255,11 +259,14 @@ train_reward_models_for_alpha() {
                 REWARD_COUNTER=$((REWARD_COUNTER + 1))
                 echo "  [$REWARD_COUNTER/$COUNTER_END] Vanilla reward (alpha=$TARGET_ALPHA)..."
                 stage_timer_start
+                VANILLA_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${TARGET_ALPHA}-len${MAX_NEW_TOKENS}-gpt2"
                 "$PYTHON" src/imdb/reward_training/vanilla_reward_training.py \
                     --user_id "$USER_ID" \
                     --seed "$SEED" \
                     --proportion "$PROPORTION" \
-                    --alpha "$TARGET_ALPHA"
+                    --alpha "$TARGET_ALPHA" \
+                    --hub_model_id "$VANILLA_HUB_ID" \
+                    --model_hub_id "$MODEL_HUB_ID"
                 stage_timer_end
                 echo ""
                 ;;
@@ -268,24 +275,30 @@ train_reward_models_for_alpha() {
                 REWARD_COUNTER=$((REWARD_COUNTER + 1))
                 echo "  [$REWARD_COUNTER/$COUNTER_END] MaxMin reward - minority (alpha=$TARGET_ALPHA)..."
                 stage_timer_start
+                MAXMIN_MIN_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${TARGET_ALPHA}-len${MAX_NEW_TOKENS}-minority-gpt2"
                 "$PYTHON" src/imdb/reward_training/maxmin_reward_training.py \
                     --user_id "$USER_ID" \
                     --seed "$SEED" \
                     --proportion "$PROPORTION" \
                     --alpha "$TARGET_ALPHA" \
-                    --group 0
+                    --group 0 \
+                    --hub_model_id "$MAXMIN_MIN_HUB_ID" \
+                    --model_hub_id "$MODEL_HUB_ID"
                 stage_timer_end
                 echo ""
 
                 REWARD_COUNTER=$((REWARD_COUNTER + 1))
                 echo "  [$REWARD_COUNTER/$COUNTER_END] MaxMin reward - majority (alpha=$TARGET_ALPHA)..."
                 stage_timer_start
+                MAXMIN_MAJ_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${TARGET_ALPHA}-len${MAX_NEW_TOKENS}-majority-gpt2"
                 "$PYTHON" src/imdb/reward_training/maxmin_reward_training.py \
                     --user_id "$USER_ID" \
                     --seed "$SEED" \
                     --proportion "$PROPORTION" \
                     --alpha "$TARGET_ALPHA" \
-                    --group 1
+                    --group 1 \
+                    --hub_model_id "$MAXMIN_MAJ_HUB_ID" \
+                    --model_hub_id "$MODEL_HUB_ID"
                 stage_timer_end
                 echo ""
                 ;;
@@ -294,12 +307,15 @@ train_reward_models_for_alpha() {
                 REWARD_COUNTER=$((REWARD_COUNTER + 1))
                 echo "  [$REWARD_COUNTER/$COUNTER_END] SharedRep reward (alpha=$TARGET_ALPHA, k=$K)..."
                 stage_timer_start
+                SHAREDREP_HUB_ID="${USER_ID}/sharedrep-imdb-reward-ALPHA${TARGET_ALPHA}-len${MAX_NEW_TOKENS}-k${K}"
                 "$PYTHON" src/imdb/reward_training/sharedrep_reward_training.py \
                     --user_id "$USER_ID" \
                     --seed "$SEED" \
                     --proportion "$PROPORTION" \
                     --alpha "$TARGET_ALPHA" \
-                    --k "$K"
+                    --k "$K" \
+                    --hub_model_id "$SHAREDREP_HUB_ID" \
+                    --model_hub_id "$MODEL_HUB_ID"
                 stage_timer_end
                 echo ""
                 ;;
@@ -388,6 +404,9 @@ else
             if [ "$METHOD" = "sharedrep" ]; then
                 PPO_ARGS+=(--k "$K")
             fi
+            if [ "$NO_REWARD_NORM" = "1" ]; then
+                PPO_ARGS+=(--no_reward_normalization)
+            fi
 
             echo "  [$PPO_COUNTER/$TOTAL_PPO] PPO $METHOD (alpha=$ALPHA)..."
             stage_timer_start
@@ -443,6 +462,7 @@ else
                 --seed "$SEED"
                 --method "$METHOD"
                 --alpha "$ALPHA"
+                --max_new_tokens "$EVAL_MAX_NEW_TOKENS"
             )
             if [ "$METHOD" != "gold" ]; then
                 EVAL_ARGS+=(--proportion "$PROPORTION")

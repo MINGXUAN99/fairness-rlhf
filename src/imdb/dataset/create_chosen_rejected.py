@@ -166,11 +166,19 @@ def create_chosen_rejected_multi(example, num_responses: int, tie_tolerance: flo
     worst_i = min(range(num_responses), key=lambda i: scores[i])
     is_tie = abs(scores[best_i] - scores[worst_i]) <= float(tie_tolerance)
 
-    return {
+    out = {
         "chosen": example[f"response_{best_i}"],
         "rejected": example[f"response_{worst_i}"],
         "is_tie": is_tie,
     }
+    # Keep scores for chosen/rejected (from raw dataset) so notebooks can read them
+    out["positiveness_chosen"] = example[f"positiveness_{best_i}"]
+    out["positiveness_rejected"] = example[f"positiveness_{worst_i}"]
+    out["length_chosen"] = example[f"length_{best_i}"]
+    out["length_rejected"] = example[f"length_{worst_i}"]
+    out["normalized_length_chosen"] = example[f"normalized_length_{best_i}"]
+    out["normalized_length_rejected"] = example[f"normalized_length_{worst_i}"]
+    return out
     
 def create_chosen_rejected_dataset(
     dataset,
@@ -212,8 +220,14 @@ def create_chosen_rejected_dataset(
     )
     if drop_ties:
         dataset = dataset.filter(lambda x: not bool(x["is_tie"]), desc="Dropping ties")
+    keep_cols = [
+        "chosen", "rejected", "group_id",
+        "positiveness_chosen", "positiveness_rejected",
+        "length_chosen", "length_rejected",
+        "normalized_length_chosen", "normalized_length_rejected",
+    ]
     dataset = dataset.remove_columns(
-        [col for col in dataset.column_names if col not in ["chosen", "rejected", "group_id"]]
+        [col for col in dataset.column_names if col not in keep_cols]
     )
     return dataset
 

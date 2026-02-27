@@ -209,9 +209,9 @@ All models and datasets are pushed to the HF Hub with systematic naming:
 
 | Method | Hub ID |
 |--------|--------|
-| Vanilla | `<user>/vanilla-imdb-reward-prop<P>-alpha<A>-seed<S>` |
-| MaxMin (minority) | `<user>/maxmin-imdb-reward-prop<P>-alpha<A>-seed<S>-minority` |
-| MaxMin (majority) | `<user>/maxmin-imdb-reward-prop<P>-alpha<A>-seed<S>-majority` |
+| Vanilla | `<user>/vanilla-imdb-reward-ALPHA<A>-len<L>-gpt2` |
+| MaxMin (minority) | `<user>/maxmin-imdb-reward-ALPHA<A>-len<L>-minority-gpt2` |
+| MaxMin (majority) | `<user>/maxmin-imdb-reward-ALPHA<A>-len<L>-majority-gpt2` |
 | SharedRep | `<user>/sharedrep-imdb-reward-prop<P>-alpha<A>-seed<S>-k<K>` |
 
 ### PPO Policies
@@ -295,7 +295,7 @@ During PPO training, the following metrics are logged to Weights & Biases:
 - **Policy model**: `lvwerra/gpt2-imdb` (GPT-2 fine-tuned on IMDb)
 - **Value model**: `lvwerra/gpt2-imdb` with `num_labels=1` (regression head)
 - **Gold reward model**: `lvwerra/distilbert-imdb` (DistilBERT sentiment classifier)
-- **Learned reward models**: GPT-2 backbone with frozen weights, trainable linear head(s)
+- **Learned reward models**: Raw GPT-2 backbone (`gpt2`) with frozen weights, trainable linear head(s)
 
 ### SharedRep Model (`SharedRepGPT2RM`)
 

@@ -95,19 +95,19 @@ def _parse_args() -> argparse.Namespace:
         "--vanilla_hub_model_id",
         type=str,
         default=None,
-        help="Vanilla RM hub model id (only for rm_type=vanilla). Default: {user_id}/vanilla-imdb-reward-ALPHA{alpha}-len{max_new_tokens}.",
+        help="Vanilla RM hub model id (only for rm_type=vanilla). Default: {user_id}/vanilla-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-gpt2.",
     )
     p.add_argument(
         "--maxmin_minority_hub_model_id",
         type=str,
         default=None,
-        help="MaxMin minority RM hub model id (only for rm_type=maxmin). Default: {user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-minority.",
+        help="MaxMin minority RM hub model id (only for rm_type=maxmin). Default: {user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-minority-gpt2.",
     )
     p.add_argument(
         "--maxmin_majority_hub_model_id",
         type=str,
         default=None,
-        help="MaxMin majority RM hub model id (only for rm_type=maxmin). Default: {user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-majority.",
+        help="MaxMin majority RM hub model id (only for rm_type=maxmin). Default: {user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-majority-gpt2.",
     )
     p.add_argument(
         "--no_write",
@@ -136,6 +136,22 @@ def _parse_args() -> argparse.Namespace:
             "Otherwise (default), use the same train split as training (train_test_split 0.95/0.05 with seed)."
         ),
     )
+    p.add_argument(
+        "--maxmin_per_group",
+        action="store_true",
+        help=(
+            "For maxmin: if set, compute mean/std per-group (minority RM on minority data only, majority on majority only). "
+            "Default: pool all groups so each RM is calibrated on the whole dataset for comparable scales."
+        ),
+    )
+    p.add_argument(
+        "--maxmin_unified",
+        action="store_true",
+        help=(
+            "For maxmin: if set, use a single (mean, std) computed from both RMs' outputs on the pooled calibration data. "
+            "Puts both RMs on the exact same scale so group means are directly comparable (avoids gap enlargement)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -160,10 +176,10 @@ def _resolve_ids(args: argparse.Namespace) -> dict[str, str]:
     ids = {"preference_dataset_hub_id": preference_dataset_hub_id}
 
     if args.rm_type == "vanilla":
-        ids["vanilla_hub_model_id"] = args.vanilla_hub_model_id or f"{uid}/vanilla-imdb-reward-ALPHA{alpha}-len{max_nt}"
+        ids["vanilla_hub_model_id"] = args.vanilla_hub_model_id or f"{uid}/vanilla-imdb-reward-ALPHA{alpha}-len{max_nt}-gpt2"
     elif args.rm_type == "maxmin":
-        ids["maxmin_minority_hub_model_id"] = args.maxmin_minority_hub_model_id or f"{uid}/maxmin-imdb-reward-ALPHA{alpha}-len{max_nt}-minority"
-        ids["maxmin_majority_hub_model_id"] = args.maxmin_majority_hub_model_id or f"{uid}/maxmin-imdb-reward-ALPHA{alpha}-len{max_nt}-majority"
+        ids["maxmin_minority_hub_model_id"] = args.maxmin_minority_hub_model_id or f"{uid}/maxmin-imdb-reward-ALPHA{alpha}-len{max_nt}-minority-gpt2"
+        ids["maxmin_majority_hub_model_id"] = args.maxmin_majority_hub_model_id or f"{uid}/maxmin-imdb-reward-ALPHA{alpha}-len{max_nt}-majority-gpt2"
     return ids
 
 
@@ -252,10 +268,19 @@ def _run_maxmin(
     ids: dict[str, str],
     device: torch.device,
 ) -> dict[str, Any]:
-    """Compute z-score stats for maxmin RMs: one (mean, std) per group over that group's training data."""
+    """Compute z-score stats for maxmin RMs.
+
+    By default (maxmin_per_group=False): each RM is calibrated on the whole training
+    dataset (all groups) for comparable normalized scales during MaxMin selection.
+    With --maxmin_per_group: minority RM on minority data only, majority on majority only.
+    With --maxmin_unified: use a single (mean, std) from both RMs' pooled outputs for
+    both groups, ensuring they are on the exact same scale (avoids gap enlargement).
+    """
     pref_id = ids["preference_dataset_hub_id"]
     model_id_min = ids["maxmin_minority_hub_model_id"]
     model_id_maj = ids["maxmin_majority_hub_model_id"]
+    pool_groups = not getattr(args, "maxmin_per_group", False)
+    use_unified = getattr(args, "maxmin_unified", False)
 
     dataset = load_dataset(pref_id, split="train")
     train_data = _get_training_split(dataset, args.seed, args.use_full_preference_dataset)
@@ -264,11 +289,10 @@ def _run_maxmin(
         if col not in train_data.column_names:
             raise ValueError(f"Preference dataset missing column '{col}'. Have: {train_data.column_names}")
 
-    def score_group(group_id: int, model_id: str, group_name: str) -> dict[str, Any]:
-        subset = train_data.filter(lambda ex: int(ex["group_id"]) == group_id)
-        if len(subset) == 0:
-            return {"n": 0, "mean": float("nan"), "std": float("nan"), "vmin": float("nan"), "vmax": float("nan")}
-        texts = list(subset["chosen"]) + list(subset["rejected"])
+    def score_texts_with_model(texts: list[str], model_id: str) -> tuple[dict[str, Any], list[float]]:
+        """Score texts with a model; return stats dict and raw logits list."""
+        if len(texts) == 0:
+            return {"n": 0, "mean": float("nan"), "std": float("nan"), "vmin": float("nan"), "vmax": float("nan")}, []
         tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
         tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
         model = AutoModelForSequenceClassification.from_pretrained(model_id)
@@ -285,10 +309,40 @@ def _run_maxmin(
             "std": stats.std,
             "vmin": stats.vmin,
             "vmax": stats.vmax,
-        }
+        }, logits
 
-    minority = score_group(0, model_id_min, "minority")
-    majority = score_group(1, model_id_maj, "majority")
+    if pool_groups:
+        all_texts = list(train_data["chosen"]) + list(train_data["rejected"])
+        minority, logits_min = score_texts_with_model(all_texts, model_id_min)
+        majority, logits_maj = score_texts_with_model(all_texts, model_id_maj)
+        minority["calibration"] = "pooled"
+        majority["calibration"] = "pooled"
+    else:
+        subset_min = train_data.filter(lambda ex: int(ex["group_id"]) == 0)
+        subset_maj = train_data.filter(lambda ex: int(ex["group_id"]) == 1)
+        texts_min = list(subset_min["chosen"]) + list(subset_min["rejected"])
+        texts_maj = list(subset_maj["chosen"]) + list(subset_maj["rejected"])
+        minority, logits_min = score_texts_with_model(texts_min, model_id_min)
+        majority, logits_maj = score_texts_with_model(texts_maj, model_id_maj)
+        minority["calibration"] = "per_group"
+        majority["calibration"] = "per_group"
+
+    if use_unified:
+        # Single (mean, std) from both RMs' outputs so both groups use the same scale
+        all_logits = logits_min + logits_maj
+        unified_stats = RunningStats()
+        unified_stats.update_many(all_logits)
+        unified_mean = unified_stats.mean
+        unified_std = unified_stats.std if not math.isnan(unified_stats.std) else 1.0
+        minority = {
+            "n": unified_stats.n,
+            "mean": unified_mean,
+            "std": unified_std,
+            "vmin": unified_stats.vmin,
+            "vmax": unified_stats.vmax,
+            "calibration": "unified",
+        }
+        majority = {**minority}
 
     return {
         "rm_type": "maxmin",
@@ -321,6 +375,11 @@ def main() -> None:
         print(f"hub_model_id: {result['hub_model_id']}")
         print(f"n={result['n']}  mean={result['mean']:.6f}  std={result['std']:.6f}  min={result['vmin']:.6f}  max={result['vmax']:.6f}")
     else:
+        calib_mode = result["minority"].get("calibration", "per_group")
+        if calib_mode == "unified":
+            print(f"maxmin calibration: unified (single mean/std from both RMs' pooled outputs)")
+        else:
+            print(f"maxmin calibration: {calib_mode} (each RM on {'whole dataset' if calib_mode == 'pooled' else 'its group only'})")
         print(f"minority (hub: {result['hub_model_id_minority']})")
         m = result["minority"]
         print(f"  n={m['n']}  mean={m['mean']:.6f}  std={m['std']:.6f}  min={m['vmin']:.6f}  max={m['vmax']:.6f}")

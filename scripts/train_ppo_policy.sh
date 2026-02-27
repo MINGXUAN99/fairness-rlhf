@@ -67,6 +67,18 @@ USER_ID="${USER_ID:-mxcui}"
 SEED="${SEED:-42}"
 PROPORTION="${PROPORTION:-0.2}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
+ALPHA="${ALPHA:-1.0}"
+# Policy base model: "gpt2" (raw) or "lvwerra/gpt2-imdb" (IMDB-pretrained)
+POLICY_MODEL_NAME="${POLICY_MODEL_NAME:-gpt2}"
+# KL coefficient (default 0.1; use KL_COEF=0 for ablation - no KL penalty)
+KL_COEF="${KL_COEF:-0.1}"
+# Set NO_REWARD_NORM=1 to disable reward normalization (use raw RM logits)
+NO_REWARD_NORM="${NO_REWARD_NORM:-0}"
+
+# Optional RM hub ID overrides (when set, passed to PPO training)
+VANILLA_RM_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-gpt2"
+MAXMIN_MINORITY_RM_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-gpt2"
+MAXMIN_MAJORITY_RM_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-gpt2"
 
 PYTHON="${PYTHON:-$(which python3)}"
 if [ -f "venv/bin/python3" ]; then
@@ -74,7 +86,7 @@ if [ -f "venv/bin/python3" ]; then
 fi
 
 # Methods and alphas
-METHODS=("vanilla" "maxmin")
+METHODS="${METHODS:-vanilla maxmin}"
 ALPHAS="${ALPHAS:-1.0}"
 # Support space-separated or array
 ALPHAS_ARRAY=($ALPHAS)
@@ -88,8 +100,13 @@ echo "Proportion:      $PROPORTION"
 echo "MAX_NEW_TOKENS:  $MAX_NEW_TOKENS"
 echo "Methods:        ${METHODS[*]}"
 echo "Alpha values:   ${ALPHAS_ARRAY[*]}"
+echo "Policy base:    $POLICY_MODEL_NAME"
+echo "KL coefficient: $KL_COEF"
 echo "Python:         $PYTHON"
 echo "Normalization:  calibration/\${USER_ID}_gpt2-imdb-preference-ALPHA\${ALPHA}-len\${MAX_NEW_TOKENS}-random.json (if present)"
+[ -n "$VANILLA_RM_HUB_ID" ] && echo "Vanilla RM:     $VANILLA_RM_HUB_ID"
+[ -n "$MAXMIN_MINORITY_RM_HUB_ID" ] && echo "MaxMin RM min:  $MAXMIN_MINORITY_RM_HUB_ID"
+[ -n "$MAXMIN_MAJORITY_RM_HUB_ID" ] && echo "MaxMin RM maj:  $MAXMIN_MAJORITY_RM_HUB_ID"
 echo "=========================================="
 echo ""
 
@@ -103,9 +120,16 @@ for METHOD in "${METHODS[@]}"; do
         # Reward normalization JSON (same filename as normalize_reward_model.py)
         NORM_JSON="calibration/${USER_ID}_gpt2-imdb-preference-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random.json"
         NORM_ARG=()
-        if [ -f "$NORM_JSON" ]; then
+        if [ "$NO_REWARD_NORM" = "1" ]; then
+            NORM_ARG=(--no_reward_normalization)
+        elif [ -f "$NORM_JSON" ]; then
             NORM_ARG=(--reward_normalization_json "$NORM_JSON")
         fi
+
+        RM_ARGS=()
+        [ -n "$VANILLA_RM_HUB_ID" ] && RM_ARGS+=(--vanilla_rm_hub_id "$VANILLA_RM_HUB_ID")
+        [ -n "$MAXMIN_MINORITY_RM_HUB_ID" ] && RM_ARGS+=(--maxmin_minority_rm_hub_id "$MAXMIN_MINORITY_RM_HUB_ID")
+        [ -n "$MAXMIN_MAJORITY_RM_HUB_ID" ] && RM_ARGS+=(--maxmin_majority_rm_hub_id "$MAXMIN_MAJORITY_RM_HUB_ID")
 
         echo ""
         echo "=========================================="
@@ -114,24 +138,34 @@ for METHOD in "${METHODS[@]}"; do
         echo "Method:          $METHOD"
         echo "Alpha:           $ALPHA"
         echo "MAX_NEW_TOKENS:  $MAX_NEW_TOKENS"
-        if [ ${#NORM_ARG[@]} -gt 0 ]; then
+        echo "KL coefficient:  $KL_COEF"
+        if [ "$NO_REWARD_NORM" = "1" ]; then
+            echo "Normalization:   (disabled via NO_REWARD_NORM)"
+        elif [ ${#NORM_ARG[@]} -gt 0 ]; then
             echo "Normalization:   $NORM_JSON"
         else
             echo "Normalization:   (none)"
         fi
+        if [ ${#RM_ARGS[@]} -gt 0 ]; then
+            echo "RM overrides:    ${RM_ARGS[*]}"
+        fi
         echo "=========================================="
         echo ""
 
+        POLICY_HUB_ID="${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-kl${KL_COEF}-gpt2"
+
         "$PYTHON" src/imdb/ppo_training/unified_ppo_training.py \
             --method "$METHOD" \
+            --policy_model_name "$POLICY_MODEL_NAME" \
             --user_id "$USER_ID" \
             --seed "$SEED" \
             --proportion "$PROPORTION" \
             --alpha "$ALPHA" \
             --max_new_tokens "$MAX_NEW_TOKENS" \
-            "${NORM_ARG[@]}"
-
-        POLICY_HUB_ID="${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}"
+            --kl_coef "$KL_COEF" \
+            --policy_hub_id "$POLICY_HUB_ID" \
+            "${NORM_ARG[@]}" \
+            "${RM_ARGS[@]}"
         echo ""
         echo "✅ Completed: $METHOD alpha=$ALPHA"
         echo "   Policy: $POLICY_HUB_ID"
@@ -147,7 +181,7 @@ echo ""
 echo "Trained policies (naming from unified_ppo_training.get_policy_hub_id):"
 for METHOD in "${METHODS[@]}"; do
     for ALPHA in "${ALPHAS_ARRAY[@]}"; do
-        echo "  - ${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}"
+        echo "  - ${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-gpt2"
     done
 done
 echo ""

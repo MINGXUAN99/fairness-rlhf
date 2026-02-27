@@ -108,6 +108,8 @@ def parse_args():
                         help="Hidden dimension (evaluation mode, required for sharedrep)")
     parser.add_argument("--alpha", type=float, default=1.0,
                         help="Alpha value (evaluation mode, default: 1.0)")
+    parser.add_argument("--policy_hub_id", type=str, default=None,
+                        help="Override policy model hub ID (evaluation mode). If set, load this model instead of deriving from method/proportion/alpha/seed.")
     
     return parser.parse_args()
 
@@ -141,7 +143,10 @@ def get_model_and_dataset_info(args):
         
     else:  # evaluation mode
         # Evaluation mode: use trained policy model on test split
-        if args.method == "gold":
+        if args.policy_hub_id:
+            model_name = args.policy_hub_id
+            output_hub_id = args.policy_hub_id.replace("-ppo-", "-ppo-eval-", 1)
+        elif args.method == "gold":
             # Gold uses alpha (defines group preferences for MaxMin objective)
             model_name = f"{args.user_id}/{args.method}-imdb-ppo-alpha{args.alpha}-seed{args.seed}"
             output_hub_id = f"{args.user_id}/{args.method}-imdb-ppo-eval-alpha{args.alpha}-seed{args.seed}"

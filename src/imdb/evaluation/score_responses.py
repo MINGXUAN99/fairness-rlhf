@@ -26,6 +26,10 @@ def parse_args():
                         help="Hidden dimension (required for sharedrep)")
     parser.add_argument("--alpha", type=float, default=1.0,
                         help="Alpha value (default: 1.0)")
+    parser.add_argument("--policy_hub_id", type=str, default=None,
+                        help="Override policy/eval dataset hub ID. If set, load eval responses from the dataset derived from this.")
+    parser.add_argument("--max_new_tokens", type=int, default=128,
+                        help="Max new tokens used in generation; used for conciseness = max_new_tokens - length (default: 128, must match evaluation generation).")
     return parser.parse_args()
 
 
@@ -48,6 +52,11 @@ if __name__ == "__main__":
     
     if args.k is not None:
         sys.argv.extend(["--k", str(args.k)])
+    
+    if args.policy_hub_id is not None:
+        sys.argv.extend(["--policy_hub_id", args.policy_hub_id])
+    
+    sys.argv.extend(["--max_new_tokens", str(args.max_new_tokens)])
     
     # Call unified script
     main()
