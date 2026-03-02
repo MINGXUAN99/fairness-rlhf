@@ -10,6 +10,7 @@
 # Usage:
 #   bash scripts/build_dataset.sh
 #   USER_ID=... HF_TOKEN=... bash scripts/build_dataset.sh
+#   SKIP_GENERATE=1 SKIP_SCORE=1 ALPHA_RANGE="0.5 0.6 0.7 0.8 0.9" bash scripts/build_dataset.sh
 #
 # ============================================================================
 
@@ -71,6 +72,8 @@ SKIP_PREFERENCE="${SKIP_PREFERENCE:-0}"
 USER_ID="${USER_ID:-mxcui}"
 SEED="${SEED:-42}"
 ALPHA="${ALPHA:-1.0}"
+# When set (e.g. "0.5 0.6 0.7 0.8 0.9"), create preference datasets for each alpha
+ALPHA_RANGE="${ALPHA_RANGE:-}"
 PROPORTION="${PROPORTION:-0.2}"
 NUM_RESPONSES="${NUM_RESPONSES:-2}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
@@ -78,8 +81,6 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 # Unique raw dataset hub id (includes exp tag to avoid overwriting prior runs)
 RAW_EXP_TAG="${RAW_EXP_TAG:-n${NUM_RESPONSES}-len${MAX_NEW_TOKENS}-random}"
 RAW_DATASET_HUB_ID="${RAW_DATASET_HUB_ID:-${USER_ID}/gpt2-imdb-raw-${RAW_EXP_TAG}}"
-PREFERENCE_EXP_TAG="${PREFERENCE_EXP_TAG:-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random}"
-PREFERENCE_DATASET_HUB_ID="${PREFERENCE_DATASET_HUB_ID:-${USER_ID}/gpt2-imdb-preference-${PREFERENCE_EXP_TAG}}"
 
 PYTHON="${PYTHON:-python3}"
 if [ -f "$PROJECT_ROOT/venv/bin/python3" ]; then
@@ -91,12 +92,15 @@ echo " Dataset build: seed=$SEED, max_new_tokens=$MAX_NEW_TOKENS"
 echo "============================================================"
 echo "USER_ID:            $USER_ID"
 echo "SEED:               $SEED"
-echo "ALPHA:              $ALPHA"
+if [ -n "$ALPHA_RANGE" ]; then
+  echo "ALPHA_RANGE:        $ALPHA_RANGE"
+else
+  echo "ALPHA:              $ALPHA"
+fi
 echo "PROPORTION:         $PROPORTION"
 echo "NUM_RESPONSES:      $NUM_RESPONSES"
 echo "MAX_NEW_TOKENS:     $MAX_NEW_TOKENS"
-echo "RAW_DATASET_HUB_ID:       $RAW_DATASET_HUB_ID"
-echo "PREFERENCE_DATASET_HUB_ID: $PREFERENCE_DATASET_HUB_ID"
+echo "RAW_DATASET_HUB_ID: $RAW_DATASET_HUB_ID"
 echo "PYTHON:             $PYTHON"
 echo "============================================================"
 echo ""
@@ -132,22 +136,46 @@ if [ "$SKIP_PREFERENCE" = 1 ]; then
   echo "[3/3] Create preference dataset (chosen/rejected) -- SKIPPED"
   echo ""
 else
-echo "[3/3] Create preference dataset (chosen/rejected)"
-"$PYTHON" src/imdb/dataset/create_chosen_rejected.py \
-  --user_id "$USER_ID" \
-  --seed "$SEED" \
-  --proportion "$PROPORTION" \
-  --alpha "$ALPHA" \
-  --num_responses "$NUM_RESPONSES" \
-  --max_new_tokens "$MAX_NEW_TOKENS" \
-  --raw_dataset_hub_id "$RAW_DATASET_HUB_ID" \
-  --output_hub_id "$PREFERENCE_DATASET_HUB_ID" \
-  --drop_ties
-echo ""
+  # Use ALPHA_RANGE if set, otherwise single ALPHA
+  if [ -n "$ALPHA_RANGE" ]; then
+    for a in $ALPHA_RANGE; do
+      PREF_OUT="${USER_ID}/gpt2-imdb-preference-ALPHA${a}-len${MAX_NEW_TOKENS}-random"
+      echo "[3/3] Create preference dataset (alpha=$a) -> $PREF_OUT"
+      "$PYTHON" src/imdb/dataset/create_chosen_rejected.py \
+        --user_id "$USER_ID" \
+        --seed "$SEED" \
+        --proportion "$PROPORTION" \
+        --alpha "$a" \
+        --num_responses "$NUM_RESPONSES" \
+        --max_new_tokens "$MAX_NEW_TOKENS" \
+        --raw_dataset_hub_id "$RAW_DATASET_HUB_ID" \
+        --output_hub_id "$PREF_OUT" \
+        --drop_ties
+      echo ""
+    done
+  else
+    PREF_OUT="${USER_ID}/gpt2-imdb-preference-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random"
+    echo "[3/3] Create preference dataset (chosen/rejected) -> $PREF_OUT"
+    "$PYTHON" src/imdb/dataset/create_chosen_rejected.py \
+      --user_id "$USER_ID" \
+      --seed "$SEED" \
+      --proportion "$PROPORTION" \
+      --alpha "$ALPHA" \
+      --num_responses "$NUM_RESPONSES" \
+      --max_new_tokens "$MAX_NEW_TOKENS" \
+      --raw_dataset_hub_id "$RAW_DATASET_HUB_ID" \
+      --output_hub_id "$PREF_OUT" \
+      --drop_ties
+    echo ""
+  fi
 fi
 
 echo "============================================================"
 echo "Done."
 echo "  Raw (scored) dataset: $RAW_DATASET_HUB_ID"
-echo "  Preference dataset:   $PREFERENCE_DATASET_HUB_ID"
+if [ -n "$ALPHA_RANGE" ]; then
+  echo "  Preference datasets:  one per alpha in ($ALPHA_RANGE)"
+else
+  echo "  Preference dataset:   ${USER_ID}/gpt2-imdb-preference-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random"
+fi
 echo "============================================================"

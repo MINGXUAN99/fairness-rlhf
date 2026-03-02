@@ -82,6 +82,10 @@ ALPHAS="${ALPHAS:-1.0}"  # Alpha values to train
 
 # Reward model backbone
 REWARD_MODEL_BASE="${REWARD_MODEL_BASE:-Qwen/Qwen3-0.6B-Base}"
+# Suffix for RM hub IDs (e.g. gpt2 or qwen06b). Default: gpt2 when backbone is gpt2, else qwen06b
+RM_SUFFIX="${RM_SUFFIX:-}"
+[ -z "$RM_SUFFIX" ] && [ "$REWARD_MODEL_BASE" = "gpt2" ] && RM_SUFFIX="gpt2"
+[ -z "$RM_SUFFIX" ] && RM_SUFFIX="qwen06b"
 
 # Skip flags (set to non-empty to skip, e.g. SKIP_TRAIN=1 or SKIP_NORM=1)
 SKIP_TRAIN="${SKIP_TRAIN:-}"
@@ -145,7 +149,7 @@ for ALPHA in $ALPHAS; do
     MODEL_COUNTER=$((MODEL_COUNTER + 1))
     PREFERENCE_EXP_TAG="ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random"
     PREFERENCE_DATASET_HUB_ID="${USER_ID}/gpt2-imdb-preference-${PREFERENCE_EXP_TAG}"
-    VANILLA_REWARD_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-qwen06b"
+    VANILLA_REWARD_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-${RM_SUFFIX}"
     
     echo ""
     echo "────────────────────────────────────────────────────────────────"
@@ -187,7 +191,7 @@ for ALPHA in $ALPHAS; do
     MODEL_COUNTER=$((MODEL_COUNTER + 1))
     PREFERENCE_EXP_TAG="ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random"
     PREFERENCE_DATASET_HUB_ID="${USER_ID}/gpt2-imdb-preference-${PREFERENCE_EXP_TAG}"
-    MAXMIN_REWARD_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-qwen06b"
+    MAXMIN_REWARD_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-${RM_SUFFIX}"
     
     echo ""
     echo "────────────────────────────────────────────────────────────────"
@@ -230,7 +234,7 @@ for ALPHA in $ALPHAS; do
     MODEL_COUNTER=$((MODEL_COUNTER + 1))
     PREFERENCE_EXP_TAG="ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random"
     PREFERENCE_DATASET_HUB_ID="${USER_ID}/gpt2-imdb-preference-${PREFERENCE_EXP_TAG}"
-    MAXMIN_REWARD_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-qwen06b"
+    MAXMIN_REWARD_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-${RM_SUFFIX}"
     
     echo ""
     echo "────────────────────────────────────────────────────────────────"
@@ -283,7 +287,7 @@ for ALPHA in $ALPHAS; do
     echo "📐 Normalization for preference dataset: $PREFERENCE_DATASET_HUB_ID"
     echo "────────────────────────────────────────────────────────────────"
     
-    VANILLA_REWARD_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-qwen06b"
+    VANILLA_REWARD_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-${RM_SUFFIX}"
     echo "  Vanilla RM z-score..."
     "$PYTHON" src/imdb/reward_training/normalize_reward_model.py \
         --rm_type vanilla \
@@ -295,8 +299,8 @@ for ALPHA in $ALPHAS; do
         --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" \
         --vanilla_hub_model_id "$VANILLA_REWARD_HUB_ID"
     
-    MAXMIN_MINORITY_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-qwen06b"
-    MAXMIN_MAJORITY_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-qwen06b"
+    MAXMIN_MINORITY_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-${RM_SUFFIX}"
+    MAXMIN_MAJORITY_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-${RM_SUFFIX}"
     echo "  MaxMin RM z-score (minority + majority)${MAXMIN_UNIFIED:+ [unified scale]}..."
     MAXMIN_NORM_ARGS=(--rm_type maxmin --user_id "$USER_ID" --seed "$SEED" --proportion "$PROPORTION" --alpha "$ALPHA" --max_new_tokens "$MAX_NEW_TOKENS" --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" --maxmin_minority_hub_model_id "$MAXMIN_MINORITY_HUB_ID" --maxmin_majority_hub_model_id "$MAXMIN_MAJORITY_HUB_ID")
     [ -n "${MAXMIN_UNIFIED:-}" ] && MAXMIN_NORM_ARGS+=(--maxmin_unified)
@@ -329,9 +333,9 @@ echo "Models on HuggingFace Hub (naming aligned with build_dataset):"
 echo ""
 for ALPHA in $ALPHAS; do
     echo "Alpha = $ALPHA (preference: ${USER_ID}/gpt2-imdb-preference-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-random):"
-    echo "  • Vanilla:   ${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-qwen06b"
-    echo "  • MaxMin-0:  ${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-qwen06b"
-    echo "  • MaxMin-1:  ${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-qwen06b"
+    echo "  • Vanilla:   ${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-${RM_SUFFIX}"
+    echo "  • MaxMin-0:  ${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-${RM_SUFFIX}"
+    echo "  • MaxMin-1:  ${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-${RM_SUFFIX}"
     echo ""
 done
 echo "════════════════════════════════════════════════════════════════"

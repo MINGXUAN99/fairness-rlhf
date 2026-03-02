@@ -102,7 +102,7 @@ def _patch_ppo_kl_to_mean_per_token():
         _experimental_ppo_module.PPOTrainer.train = patched_train
 
 
-_patch_ppo_kl_to_mean_per_token()
+# Patch is applied conditionally in main() based on --kl_div (see below).
 
 # Shared state for tracking which group is selected as worst during MaxMin/SharedRep PPO.
 # Written by custom get_reward functions, read by GroupSelectionCallback.
@@ -371,6 +371,64 @@ def get_sharedrep_reward(model: torch.nn.Module, query_responses: torch.Tensor, 
         return _original_get_reward(model, query_responses, pad_token_id, context_length)
 
 
+def prepare_get_sharedrep_reward(policy_tokenizer, reward_tokenizer, max_length: int = 512):
+    """
+    Returns a get_reward-compatible function that re-tokenizes query_responses when
+    policy and reward tokenizers differ.
+    """
+    need_alignment = len(policy_tokenizer) != len(reward_tokenizer)
+
+    def get_sharedrep_reward_aligned(
+        model: torch.nn.Module,
+        query_responses: torch.Tensor,
+        pad_token_id: int,
+        context_length: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if isinstance(model, SharedRepGPT2RM) and need_alignment:
+            qr, rpad, ctx = _align_query_responses_to_reward_tokenizer(
+                policy_tokenizer,
+                reward_tokenizer,
+                query_responses,
+                pad_token_id,
+                context_length,
+                query_responses.device,
+                max_length=max_length,
+            )
+            return get_sharedrep_reward(model, qr, rpad, ctx)
+        return get_sharedrep_reward(model, query_responses, pad_token_id, context_length)
+
+    return get_sharedrep_reward_aligned
+
+
+def _align_query_responses_to_reward_tokenizer(
+    policy_tokenizer,
+    reward_tokenizer,
+    query_responses: torch.Tensor,
+    pad_token_id: int,
+    context_length: int,
+    device,
+    max_length: int = 512,
+) -> tuple[torch.Tensor, int, int]:
+    """
+    Re-tokenize query_responses (policy token space) into reward tokenizer space.
+    Used when policy and reward model use different tokenizers (e.g. Qwen policy + GPT-2 RM).
+    Returns (aligned_query_responses, reward_pad_token_id, 0) for _original_get_reward.
+    """
+    texts = policy_tokenizer.batch_decode(query_responses, skip_special_tokens=True)
+    encoded = reward_tokenizer(
+        texts,
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt",
+        pad_to_multiple_of=1,
+    ).to(device)
+    reward_pad_id = reward_tokenizer.pad_token_id
+    if reward_pad_id is None:
+        reward_pad_id = reward_tokenizer.eos_token_id
+    return encoded["input_ids"], reward_pad_id, 0
+
+
 def get_vanilla_reward(model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Vanilla (single RM) reward: use TRL's get_reward then apply z-score normalization if enabled.
@@ -379,6 +437,48 @@ def get_vanilla_reward(model: torch.nn.Module, query_responses: torch.Tensor, pa
     if _reward_normalization["enabled"] and _reward_normalization["vanilla"]["mean"] is not None:
         final_rewards = _apply_reward_normalization(final_rewards)
     return reward_logits, final_rewards, sequence_lengths
+
+
+def prepare_get_vanilla_reward(policy_tokenizer, reward_tokenizer, max_length: int = 512):
+    """
+    Returns a get_reward-compatible function that re-tokenizes query_responses when
+    policy and reward tokenizers differ (e.g. Qwen policy + GPT-2 RM).
+    Avoids CUDA index-out-of-bounds when policy token IDs exceed reward model vocab size.
+    """
+    policy_vocab_size = len(policy_tokenizer)
+    reward_vocab_size = len(reward_tokenizer)
+    need_alignment = policy_vocab_size != reward_vocab_size
+
+    def get_vanilla_reward_aligned(
+        model: torch.nn.Module,
+        query_responses: torch.Tensor,
+        pad_token_id: int,
+        context_length: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Value model (num_labels==1) uses policy tokenizer; no alignment needed
+        if getattr(model.config, "num_labels", 0) == 1:
+            return get_vanilla_reward(model, query_responses, pad_token_id, context_length)
+        # Reward model: align if tokenizers differ
+        if need_alignment:
+            qr, rpad, ctx = _align_query_responses_to_reward_tokenizer(
+                policy_tokenizer,
+                reward_tokenizer,
+                query_responses,
+                pad_token_id,
+                context_length,
+                query_responses.device,
+                max_length=max_length,
+            )
+            reward_logits, final_rewards, sequence_lengths = _original_get_reward(model, qr, rpad, ctx)
+        else:
+            reward_logits, final_rewards, sequence_lengths = _original_get_reward(
+                model, query_responses, pad_token_id, context_length
+            )
+        if _reward_normalization["enabled"] and _reward_normalization["vanilla"]["mean"] is not None:
+            final_rewards = _apply_reward_normalization(final_rewards)
+        return reward_logits, final_rewards, sequence_lengths
+
+    return get_vanilla_reward_aligned
 
 
 def get_maxmin_reward(model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -458,6 +558,37 @@ def get_maxmin_reward(model: torch.nn.Module, query_responses: torch.Tensor, pad
     else:
         # Value model or other model: use the ORIGINAL get_reward (not the overridden one)
         return _original_get_reward(model, query_responses, pad_token_id, context_length)
+
+
+def prepare_get_maxmin_reward(policy_tokenizer, reward_tokenizer, max_length: int = 512):
+    """
+    Returns a get_reward-compatible function that re-tokenizes query_responses when
+    policy and reward tokenizers differ (e.g. Qwen policy + GPT-2 RM).
+    """
+    policy_vocab_size = len(policy_tokenizer)
+    reward_vocab_size = len(reward_tokenizer)
+    need_alignment = policy_vocab_size != reward_vocab_size
+
+    def get_maxmin_reward_aligned(
+        model: torch.nn.Module,
+        query_responses: torch.Tensor,
+        pad_token_id: int,
+        context_length: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if isinstance(model, MaxMinRewardWrapper) and need_alignment:
+            qr, rpad, ctx = _align_query_responses_to_reward_tokenizer(
+                policy_tokenizer,
+                reward_tokenizer,
+                query_responses,
+                pad_token_id,
+                context_length,
+                query_responses.device,
+                max_length=max_length,
+            )
+            return get_maxmin_reward(model, qr, rpad, ctx)
+        return get_maxmin_reward(model, query_responses, pad_token_id, context_length)
+
+    return get_maxmin_reward_aligned
 
 
 def prepare_get_gold_reward(policy_tokenizer, reward_tokenizer, alpha, max_length=512, norm_divisor=250):
@@ -723,6 +854,11 @@ def parse_args():
                         help="Override policy hub ID for saving. If omitted, derived from method/user_id/seed/proportion/alpha.")
     parser.add_argument("--kl_coef", type=float, default=0.1,
                         help="KL penalty coefficient (default 0.1). Set to 0 for ablation (no KL penalty; may cause policy collapse).")
+    parser.add_argument("--kl_div", type=str, default="mean_kl", choices=["total", "mean_kl"],
+                        help=(
+                            "How to apply KL penalty: 'total' = TRL default (sum of KL over tokens, length-dependent); "
+                            "'mean_kl' = mean KL per token (length-invariant). Default: mean_kl."
+                        ))
     return parser.parse_args()
 
 
@@ -850,19 +986,20 @@ def setup_reward_function(method, policy_tokenizer, reward_tokenizer, reward_mod
     # 2. PPOTrainer's own module namespace (where `from ..utils import get_reward` placed it)
     # Both must be set to ensure the override takes effect.
     
+    max_length = 512
     if method == "sharedrep":
-        custom_fn = get_sharedrep_reward
+        custom_fn = prepare_get_sharedrep_reward(policy_tokenizer, reward_tokenizer, max_length=max_length)
     elif method == "maxmin":
-        custom_fn = get_maxmin_reward
+        custom_fn = prepare_get_maxmin_reward(policy_tokenizer, reward_tokenizer, max_length=max_length)
     elif method == "gold":
         # Pass alpha to gold reward function for consistent group preference computation
-        custom_fn = prepare_get_gold_reward(policy_tokenizer, reward_tokenizer, alpha, max_length=512, norm_divisor=250)
+        custom_fn = prepare_get_gold_reward(policy_tokenizer, reward_tokenizer, alpha, max_length=max_length, norm_divisor=250)
     elif method == "gold_vanilla":
         # Oracle per-sample group scoring, no MaxMin
-        custom_fn = prepare_get_gold_vanilla_reward(policy_tokenizer, reward_tokenizer, alpha, proportion, max_length=512, norm_divisor=250)
+        custom_fn = prepare_get_gold_vanilla_reward(policy_tokenizer, reward_tokenizer, alpha, proportion, max_length=max_length, norm_divisor=250)
     elif method == "vanilla":
         # Vanilla: use wrapper so we can apply z-score normalization when enabled
-        custom_fn = get_vanilla_reward
+        custom_fn = prepare_get_vanilla_reward(policy_tokenizer, reward_tokenizer, max_length=max_length)
     else:
         raise ValueError(f"Unknown method: {method}")
     
@@ -880,6 +1017,15 @@ if __name__ == "__main__":
     device = accelerator.device
 
     args = parse_args()
+
+    # Apply mean_kl patch only when --kl_div mean_kl (default). For "total", use TRL default.
+    if args.kl_div == "mean_kl":
+        _patch_ppo_kl_to_mean_per_token()
+        if accelerator.is_main_process:
+            print("KL penalty: mean_kl (length-invariant, mean KL per token)")
+    else:
+        if accelerator.is_main_process:
+            print("KL penalty: total (TRL default, sum of KL over tokens)")
     method = args.method
     user_id = args.user_id
     seed = args.seed

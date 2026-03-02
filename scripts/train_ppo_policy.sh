@@ -69,10 +69,13 @@ PROPORTION="${PROPORTION:-0.2}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 ALPHA="${ALPHA:-1.0}"
 # Policy base models: e.g. "gpt2" or "Qwen/Qwen3-0.6B" (space-separated for multiple)
-POLICY_MODEL_NAMES="${POLICY_MODEL_NAMES:-gpt2 Qwen/Qwen3-0.6B}"
+POLICY_MODEL_NAMES="${POLICY_MODEL_NAMES:-gpt2}" #Qwen/Qwen3-0.6B}"
 POLICY_MODEL_NAMES_ARRAY=($POLICY_MODEL_NAMES)
 # KL coefficient (default 0.1; use KL_COEF=0 for ablation - no KL penalty)
 KL_COEF="${KL_COEF:-0.1}"
+# KL penalty type: "total" = TRL default (sum over tokens), "mean_kl" = mean per token (length-invariant)
+KL_DIV="${KL_DIV:-mean_kl}"
+[ "$KL_DIV" = "mean_kl" ] && KL_SUFFIX="mean_kl" || KL_SUFFIX="kl"
 # Set NO_REWARD_NORM=1 to disable reward normalization (use raw RM logits)
 NO_REWARD_NORM="${NO_REWARD_NORM:-1}"
 
@@ -106,6 +109,7 @@ echo "Methods:        ${METHODS_ARRAY[*]}"
 echo "Alpha values:   ${ALPHAS_ARRAY[*]}"
 echo "Policy models:  ${POLICY_MODEL_NAMES_ARRAY[*]}"
 echo "KL coefficient: $KL_COEF"
+echo "KL div:         $KL_DIV (suffix: ${KL_SUFFIX})"
 echo "Python:         $PYTHON"
 echo "Normalization:  calibration/\${USER_ID}_gpt2-imdb-preference-ALPHA\${ALPHA}-len\${MAX_NEW_TOKENS}-random.json (if present)"
 [ -n "$VANILLA_RM_HUB_ID" ] && echo "Vanilla RM:     $VANILLA_RM_HUB_ID"
@@ -159,9 +163,9 @@ for METHOD in "${METHODS_ARRAY[@]}"; do
 
         # Sanitize model name for hub ID (replace / with -)
         POLICY_MODEL_SUFFIX="${POLICY_MODEL_NAME//\//-}"
-        POLICY_HUB_ID="${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-mean_kl${KL_COEF}-${POLICY_MODEL_SUFFIX}"
+        POLICY_HUB_ID="${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}"
 
-        CUDA_VISIBLE_DEVICES=1 "$PYTHON" src/imdb/ppo_training/unified_ppo_training.py \
+        "$PYTHON" src/imdb/ppo_training/unified_ppo_training.py \
             --method "$METHOD" \
             --policy_model_name "$POLICY_MODEL_NAME" \
             --user_id "$USER_ID" \
@@ -170,6 +174,7 @@ for METHOD in "${METHODS_ARRAY[@]}"; do
             --alpha "$ALPHA" \
             --max_new_tokens "$MAX_NEW_TOKENS" \
             --kl_coef "$KL_COEF" \
+            --kl_div "$KL_DIV" \
             --policy_hub_id "$POLICY_HUB_ID" \
             "${NORM_ARG[@]}" \
             "${RM_ARGS[@]}"
@@ -189,7 +194,7 @@ echo "Trained policies:"
 for METHOD in "${METHODS_ARRAY[@]}"; do
     for POLICY_MODEL_NAME in "${POLICY_MODEL_NAMES_ARRAY[@]}"; do
         POLICY_MODEL_SUFFIX="${POLICY_MODEL_NAME//\//-}"
-        echo "  - ${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-mean_kl${KL_COEF}-${POLICY_MODEL_SUFFIX}"
+        echo "  - ${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}"
     done
 done
 echo ""
