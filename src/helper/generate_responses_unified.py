@@ -44,7 +44,8 @@ def resolve_hf_token(cli_token=None):
     Resolve the HuggingFace token from (in priority order):
       1. Explicit CLI argument (--hf_token)
       2. HF_TOKEN environment variable
-      3. Cached token file (~/.cache/huggingface/token)
+      3. huggingface_hub.get_token() (respects HF_HOME and `hf auth login`)
+      4. Legacy cached token file (~/.cache/huggingface/token)
     Returns the token string, or None if unavailable.
     """
     if cli_token:
@@ -52,15 +53,28 @@ def resolve_hf_token(cli_token=None):
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if token:
         return token
-    # Read cached token file directly (HfApi().token can return None even when file exists)
-    token_path = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "token")
     try:
-        with open(token_path) as f:
-            token = f.read().strip()
-            if token:
-                return token
-    except FileNotFoundError:
+        from huggingface_hub import get_token
+
+        token = get_token()
+        if token:
+            return token
+    except Exception:
         pass
+    # Fallback: read token file directly (default or HF_HOME path)
+    hf_home = os.environ.get("HF_HOME")
+    token_paths = []
+    if hf_home:
+        token_paths.append(os.path.join(hf_home, "token"))
+    token_paths.append(os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "token"))
+    for token_path in token_paths:
+        try:
+            with open(token_path) as f:
+                token = f.read().strip()
+                if token:
+                    return token
+        except FileNotFoundError:
+            continue
     return None
 
 

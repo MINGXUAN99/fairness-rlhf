@@ -56,9 +56,6 @@ if __name__ == "__main__":
     
     # Freeze Backbone (GPT-2 uses .transformer, Qwen/LLaMA use .model)
     if freeze_backbone:
-        # #region agent log
-        import json as _dbg_json; _lp = "/home/mx/fairness-rlhf/.cursor/debug-d71a21.log"; _h1=hasattr(model,"model"); _h2=hasattr(model,"transformer"); open(_lp,"a").write(_dbg_json.dumps({"hypothesisId":"H1","message":"backbone attrs","data":{"has_model":_h1,"has_transformer":_h2,"model_type":type(model).__name__},"location":"vanilla_reward_training.py:59"})+"\n")
-        # #endregion
         if hasattr(model, "model"):
             backbone = model.model
         elif hasattr(model, "transformer"):

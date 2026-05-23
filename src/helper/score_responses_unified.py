@@ -21,6 +21,41 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from src.helper.imdb_utils import compute_length_score
 
 
+def sync_dataset_card_readme(dataset, repo_id: str) -> None:
+    """Update Hub dataset README features to match scored parquet columns."""
+    from huggingface_hub import HfApi
+
+    feature_lines = []
+    for name in dataset.column_names:
+        feat = dataset.features[name]
+        dtype = getattr(feat, "dtype", "string")
+        feature_lines.append(f"  - name: {name}\n    dtype: {dtype}")
+
+    readme = (
+        "---\n"
+        "dataset_info:\n"
+        "  features:\n"
+        + "\n".join(feature_lines)
+        + "\n"
+        "  splits:\n"
+        "  - name: train\n"
+        f"    num_examples: {len(dataset)}\n"
+        "configs:\n"
+        "- config_name: default\n"
+        "  data_files:\n"
+        "  - split: train\n"
+        "    path: data/train-*\n"
+        "---\n"
+    )
+    HfApi().upload_file(
+        path_or_fileobj=readme.encode(),
+        path_in_repo="README.md",
+        repo_id=repo_id,
+        repo_type="dataset",
+        commit_message="Sync dataset card features with scored columns",
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Score responses (unified for dataset and evaluation)")
     
@@ -418,6 +453,8 @@ def main():
         
         # Push to hub
         dataset.push_to_hub(dataset_name, private=True)
+        if args.mode == "evaluation" and accelerator.is_main_process:
+            sync_dataset_card_readme(dataset, dataset_name)
         print(f"✅ Successfully pushed scores to {dataset_name}")
 
 

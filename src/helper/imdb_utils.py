@@ -106,3 +106,24 @@ def pre_processing_imdb(
         return example
     ds = ds.map(sample_length, batched=False, num_proc=32, desc="Sampling length")
     return ds
+
+
+def load_ppo_eval(repo_id: str, split: str = "train"):
+    """
+    Load a PPO eval dataset from the Hub.
+
+    Falls back to parquet if the dataset card features are stale (e.g. after
+    generate + score left README with only prompt/completion).
+    """
+    from datasets import load_dataset
+
+    try:
+        data = load_dataset(repo_id)
+    except Exception:
+        data = load_dataset(
+            "parquet",
+            data_files=f"hf://datasets/{repo_id}/data/train-*.parquet",
+        )
+    if hasattr(data, "keys"):
+        return data[split if split in data else list(data.keys())[0]]
+    return data
