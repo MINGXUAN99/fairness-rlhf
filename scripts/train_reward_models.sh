@@ -40,7 +40,7 @@ if [ "${1:-}" != "__internal" ] && [ -z "${FAIRNESS_RLHF_INTERNAL_RUN:-}" ]; the
     export FAIRNESS_RLHF_INTERNAL_RUN=1
 
     if command -v script >/dev/null 2>&1; then
-        script -q -f "$FULL_LOG_FILE" -c "bash \"$0\" __internal"
+        script -q -e -f "$FULL_LOG_FILE" -c "bash \"$0\" __internal"
         exit $?
     else
         builtin echo "WARNING: 'script' not found; falling back to tee for full log."
@@ -80,12 +80,46 @@ fi
 # Alpha values configuration
 ALPHAS="${ALPHAS:-1.0}"  # Alpha values to train
 
-# Reward model backbone
-REWARD_MODEL_BASE="${REWARD_MODEL_BASE:-Qwen/Qwen3-0.6B-Base}"
-# Suffix for RM hub IDs (e.g. gpt2 or qwen06b). Default: gpt2 when backbone is gpt2, else qwen06b
+# Reward model backbone. Default: gpt2 (legacy). Modern backbones are opt-in, e.g.
+#   REWARD_MODEL_BASE=EleutherAI/pythia-160m    bash scripts/train_reward_models.sh
+#   REWARD_MODEL_BASE=meta-llama/Llama-3.2-1B   bash scripts/train_reward_models.sh
+#   REWARD_MODEL_BASE=Qwen/Qwen3-4B-Base        bash scripts/train_reward_models.sh
+# EleutherAI/pythia-160m (~162M) is the closest modern LM to GPT-2 base (124M),
+# non-gated, and full fine-tunable exactly like GPT-2 -- the best pick for
+# reproducing the GPT-2 results with a modern backbone. Llama-3.2-1B is a larger
+# (~1.2B) mid-size option. (Llama/Qwen may be gated: accept the license and set
+# HF_TOKEN / `hf auth login` first; Pythia is not gated.)
+REWARD_MODEL_BASE="${REWARD_MODEL_BASE:-gpt2}"
+# Suffix for RM hub IDs (e.g. gpt2, qwen4b, qwen06b, llama1b). Default derived from backbone.
 RM_SUFFIX="${RM_SUFFIX:-}"
-[ -z "$RM_SUFFIX" ] && [ "$REWARD_MODEL_BASE" = "gpt2" ] && RM_SUFFIX="gpt2"
-[ -z "$RM_SUFFIX" ] && RM_SUFFIX="qwen06b"
+if [ -z "$RM_SUFFIX" ]; then
+    case "$REWARD_MODEL_BASE" in
+        gpt2|*gpt2*) RM_SUFFIX="gpt2" ;;
+        *Qwen3-4B*)  RM_SUFFIX="qwen4b" ;;
+        *Qwen3-0.6B*) RM_SUFFIX="qwen06b" ;;
+        *Llama-3.2-1B*|*Llama-3.2-1b*|*llama-3.2-1b*) RM_SUFFIX="llama1b" ;;
+        *Llama-3.2-3B*|*Llama-3.2-3b*|*llama-3.2-3b*) RM_SUFFIX="llama3b" ;;
+        *Llama*|*llama*|*LLaMA*) RM_SUFFIX="llama" ;;
+        *pythia-160m*|*Pythia-160m*) RM_SUFFIX="pythia160m" ;;
+        *pythia-410m*|*Pythia-410m*) RM_SUFFIX="pythia410m" ;;
+        *pythia-1b*|*Pythia-1b*) RM_SUFFIX="pythia1b" ;;
+        *pythia-1.4b*|*Pythia-1.4b*) RM_SUFFIX="pythia14b" ;;
+        *pythia*|*Pythia*) RM_SUFFIX="pythia" ;;
+        *) RM_SUFFIX="qwen4b" ;;
+    esac
+fi
+# LoRA: unset lets the Python default decide (on for non-GPT-2). Set USE_LORA=0 to
+# force head-only linear-probe training, USE_LORA=1 to force LoRA.
+USE_LORA="${USE_LORA:-}"
+LORA_ARG=()
+[ "$USE_LORA" = "1" ] && LORA_ARG=(--use_lora)
+[ "$USE_LORA" = "0" ] && LORA_ARG=(--no_lora)
+
+# Subset of RM heads to train (enables per-GPU parallel dispatch: run this script
+# once per head, each pinned to a different GPU). Default: all three. Valid tokens:
+# vanilla, maxmin-minority, maxmin-majority.
+RM_METHODS="${RM_METHODS:-vanilla maxmin-minority maxmin-majority}"
+_rm_selected() { case " $RM_METHODS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # Skip flags (set to non-empty to skip, e.g. SKIP_TRAIN=1 or SKIP_NORM=1)
 SKIP_TRAIN="${SKIP_TRAIN:-}"
@@ -159,7 +193,7 @@ for ALPHA in $ALPHAS; do
     echo "Preference dataset: $PREFERENCE_DATASET_HUB_ID"
     echo "Hub model id:       $VANILLA_REWARD_HUB_ID"
     
-    if [ -z "$SKIP_TRAIN" ]; then
+    if [ -z "$SKIP_TRAIN" ] && _rm_selected vanilla; then
         "$PYTHON" src/imdb/reward_training/vanilla_reward_training.py \
             --user_id "$USER_ID" \
             --seed "$SEED" \
@@ -167,7 +201,8 @@ for ALPHA in $ALPHAS; do
             --alpha "$ALPHA" \
             --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" \
             --hub_model_id "$VANILLA_REWARD_HUB_ID" \
-            --model_hub_id "$REWARD_MODEL_BASE"
+            --model_hub_id "$REWARD_MODEL_BASE" \
+            "${LORA_ARG[@]}"
         echo "✅ Vanilla model (alpha=$ALPHA) training complete"
     else
         echo "⏭️  Vanilla model (alpha=$ALPHA) training skipped (SKIP_TRAIN)"
@@ -201,7 +236,7 @@ for ALPHA in $ALPHAS; do
     echo "Preference dataset: $PREFERENCE_DATASET_HUB_ID"
     echo "Hub model id:       $MAXMIN_REWARD_HUB_ID"
     
-    if [ -z "$SKIP_TRAIN" ]; then
+    if [ -z "$SKIP_TRAIN" ] && _rm_selected maxmin-minority; then
         "$PYTHON" src/imdb/reward_training/maxmin_reward_training.py \
             --user_id "$USER_ID" \
             --seed "$SEED" \
@@ -210,7 +245,8 @@ for ALPHA in $ALPHAS; do
             --group 0 \
             --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" \
             --hub_model_id "$MAXMIN_REWARD_HUB_ID" \
-            --model_hub_id "$REWARD_MODEL_BASE"
+            --model_hub_id "$REWARD_MODEL_BASE" \
+            "${LORA_ARG[@]}"
         echo "✅ MaxMin minority model (alpha=$ALPHA) training complete"
     else
         echo "⏭️  MaxMin minority model (alpha=$ALPHA) training skipped (SKIP_TRAIN)"
@@ -244,7 +280,7 @@ for ALPHA in $ALPHAS; do
     echo "Preference dataset: $PREFERENCE_DATASET_HUB_ID"
     echo "Hub model id:       $MAXMIN_REWARD_HUB_ID"
     
-    if [ -z "$SKIP_TRAIN" ]; then
+    if [ -z "$SKIP_TRAIN" ] && _rm_selected maxmin-majority; then
         "$PYTHON" src/imdb/reward_training/maxmin_reward_training.py \
             --user_id "$USER_ID" \
             --seed "$SEED" \
@@ -253,7 +289,8 @@ for ALPHA in $ALPHAS; do
             --group 1 \
             --preference_dataset_hub_id "$PREFERENCE_DATASET_HUB_ID" \
             --hub_model_id "$MAXMIN_REWARD_HUB_ID" \
-            --model_hub_id "$REWARD_MODEL_BASE"
+            --model_hub_id "$REWARD_MODEL_BASE" \
+            "${LORA_ARG[@]}"
         echo "✅ MaxMin majority model (alpha=$ALPHA) training complete"
     else
         echo "⏭️  MaxMin majority model (alpha=$ALPHA) training skipped (SKIP_TRAIN)"

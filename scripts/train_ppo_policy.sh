@@ -1,5 +1,10 @@
 #!/bin/bash
-# Train PPO policies for vanilla and maxmin methods over alpha values.
+# Train PPO policies over methods and alpha values.
+#
+# Methods (--method): vanilla, maxmin, sharedrep, gold, gold_vanilla, pcgrad,
+#   sumgrad, mgda. The multi-objective combiners (pcgrad/sumgrad/mgda) reuse the
+#   MaxMin minority/majority reward models. mgda = MGDA min-norm common-descent
+#   (Sener & Koltun 2018, arXiv:1810.04650).
 #
 # Logging: two log files (same pattern as build_dataset.sh / train_reward_models.sh):
 #   - Echo log: only this script's echo lines (clean + readable)
@@ -41,7 +46,7 @@ if [ "${1:-}" != "__internal" ] && [ -z "${FAIRNESS_RLHF_INTERNAL_RUN:-}" ]; the
     export FAIRNESS_RLHF_INTERNAL_RUN=1
 
     if command -v script >/dev/null 2>&1; then
-        script -q -f "$FULL_LOG_FILE" -c "bash \"$0\" __internal"
+        script -q -e -f "$FULL_LOG_FILE" -c "bash \"$0\" __internal"
         exit $?
     else
         builtin echo "WARNING: 'script' not found; falling back to tee for full log."
@@ -68,9 +73,41 @@ SEED="${SEED:-42}"
 PROPORTION="${PROPORTION:-0.2}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 ALPHA="${ALPHA:-1.0}"
-# Policy base models: e.g. "gpt2" or "Qwen/Qwen3-0.6B" (space-separated for multiple)
-POLICY_MODEL_NAMES="${POLICY_MODEL_NAMES:-gpt2}" #Qwen/Qwen3-0.6B}"
+# Policy base models: e.g. "gpt2" (default), "meta-llama/Llama-3.2-1B", or
+# "Qwen/Qwen3-4B-Base" (space-separated to train multiple in one run).
+POLICY_MODEL_NAMES="${POLICY_MODEL_NAMES:-gpt2}"
 POLICY_MODEL_NAMES_ARRAY=($POLICY_MODEL_NAMES)
+# Value (critic) backbone. Empty -> use the policy backbone (default). For a large
+# LoRA policy (e.g. Qwen3-4B) set a small SAME-tokenizer critic, e.g.
+# VALUE_MODEL_NAME=Qwen/Qwen3-0.6B-Base, to keep the full-FT value model cheap.
+VALUE_MODEL_NAME="${VALUE_MODEL_NAME:-}"
+VALUE_ARG=()
+[ -n "$VALUE_MODEL_NAME" ] && VALUE_ARG=(--value_model_name "$VALUE_MODEL_NAME")
+# LoRA on the policy: unset -> Python default (on for non-GPT-2, off for gpt2). USE_LORA=0/1 to force.
+USE_LORA="${USE_LORA:-}"
+LORA_ARG=()
+[ "$USE_LORA" = "1" ] && LORA_ARG=(--use_lora)
+[ "$USE_LORA" = "0" ] && LORA_ARG=(--no_lora)
+# Gradient checkpointing (recommended for large backbones). GRAD_CKPT=1 to enable.
+GRAD_CKPT="${GRAD_CKPT:-0}"
+GRAD_CKPT_ARG=()
+[ "$GRAD_CKPT" = "1" ] && GRAD_CKPT_ARG=(--gradient_checkpointing)
+# NF4-quantize the frozen reward/ref models (QLoRA-style) for extra VRAM headroom.
+# LOAD_IN_4BIT_FROZEN=1 to enable (needs bitsandbytes>=0.45 on Blackwell).
+LOAD_4BIT_ARG=()
+[ "${LOAD_IN_4BIT_FROZEN:-0}" = "1" ] && LOAD_4BIT_ARG=(--load_in_4bit_frozen)
+# Launcher: single GPU (plain python) by default to match the legacy GPT-2 run.
+# For multi-GPU Qwen training set:
+#   LAUNCHER="accelerate launch --config_file accelerate_config_ddp.yaml"
+ACCEL_CONFIG="${ACCEL_CONFIG:-accelerate_config_ddp.yaml}"
+# Learning rate (default 3e-6 legacy; ~1.4e-5 is the standard TRL sentiment-PPO
+# value — raise if objective/scores stays flat, i.e. the policy isn't learning).
+LEARNING_RATE="${LEARNING_RATE:-3e-6}"
+# Total PPO episodes (more = more updates ≈ total_episodes/batch). Default 50000.
+TOTAL_EPISODES="${TOTAL_EPISODES:-50000}"
+# Optional tag appended to the policy hub id so tuning runs don't clobber existing
+# policies, e.g. RUN_TAG=lr1.4e-5 -> ...-EleutherAI-pythia-160m-lr1.4e-5
+RUN_TAG="${RUN_TAG:-}"
 # KL coefficient (default 0.1; use KL_COEF=0 for ablation - no KL penalty)
 KL_COEF="${KL_COEF:-0.1}"
 # KL penalty type: "total" = TRL default (sum over tokens), "mean_kl" = mean per token (length-invariant)
@@ -78,14 +115,25 @@ KL_DIV="${KL_DIV:-mean_kl}"
 [ "$KL_DIV" = "mean_kl" ] && KL_SUFFIX="mean_kl" || KL_SUFFIX="kl"
 # Set NO_REWARD_NORM=1 to disable reward normalization (use raw RM logits)
 NO_REWARD_NORM="${NO_REWARD_NORM:-1}"
+# MGDA only: mean-norm rescale the two group gradients before the min-norm solve
+# (recommended when the minority/majority RMs differ in reward scale). MGDA_NORMALIZE=1 to enable.
+MGDA_NORMALIZE="${MGDA_NORMALIZE:-0}"
+# sumgrad/mgda only: record cos(g1, g2) between the minority/majority objective
+# gradients every update to a CSV under diagnostics/ (gradient-conflict trace).
+# RECORD_COSINE=1 to enable.
+RECORD_COSINE="${RECORD_COSINE:-0}"
 
 # HuggingFace token for private repos (export HF_TOKEN or run: hf auth login)
 # Python/transformers use HF_TOKEN automatically for from_pretrained/push_to_hub
 
 # Optional RM hub ID overrides (when set, passed to PPO training)
-VANILLA_RM_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-gpt2"
-MAXMIN_MINORITY_RM_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-gpt2"
-MAXMIN_MAJORITY_RM_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-gpt2"
+# RM hub-id suffix should match train_reward_models.sh RM_SUFFIX (default gpt2;
+# e.g. pythia160m for EleutherAI/pythia-160m, llama1b for meta-llama/Llama-3.2-1B,
+# qwen4b for a Qwen3-4B reward backbone).
+RM_SUFFIX="${RM_SUFFIX:-gpt2}"
+VANILLA_RM_HUB_ID="${USER_ID}/vanilla-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-${RM_SUFFIX}"
+MAXMIN_MINORITY_RM_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-minority-${RM_SUFFIX}"
+MAXMIN_MAJORITY_RM_HUB_ID="${USER_ID}/maxmin-imdb-reward-ALPHA${ALPHA}-len${MAX_NEW_TOKENS}-majority-${RM_SUFFIX}"
 
 PYTHON="${PYTHON:-$(which python3)}"
 if [ -f "venv/bin/python3" ]; then
@@ -163,11 +211,28 @@ for METHOD in "${METHODS_ARRAY[@]}"; do
 
         # Sanitize model name for hub ID (replace / with -)
         POLICY_MODEL_SUFFIX="${POLICY_MODEL_NAME//\//-}"
-        POLICY_HUB_ID="${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}"
+        POLICY_HUB_ID="${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}${RUN_TAG:+-${RUN_TAG}}"
 
-        "$PYTHON" src/imdb/ppo_training/unified_ppo_training.py \
+        # Method-specific extra args (MGDA normalization + gradient-conflict CSV).
+        METHOD_EXTRA_ARGS=()
+        if [ "$METHOD" = "mgda" ] && [ "$MGDA_NORMALIZE" = "1" ]; then
+            METHOD_EXTRA_ARGS+=(--mgda_normalize)
+            echo "MGDA:            mean-norm rescale before min-norm solve (--mgda_normalize)"
+        fi
+        if { [ "$METHOD" = "mgda" ] || [ "$METHOD" = "sumgrad" ]; } && [ "$RECORD_COSINE" = "1" ]; then
+            mkdir -p "$PROJECT_ROOT/diagnostics"
+            COSINE_CSV="diagnostics/cosine_${METHOD}-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}${RUN_TAG:+-${RUN_TAG}}.csv"
+            METHOD_EXTRA_ARGS+=(--sumgrad_cosine_csv "$COSINE_CSV")
+            echo "Conflict CSV:    $COSINE_CSV"
+        fi
+
+        # Launcher: plain python (single GPU) by default. Override for multi-GPU:
+        #   LAUNCHER="accelerate launch --config_file $ACCEL_CONFIG"
+        LAUNCHER="${LAUNCHER:-$PYTHON}"
+        $LAUNCHER src/imdb/ppo_training/unified_ppo_training.py \
             --method "$METHOD" \
             --policy_model_name "$POLICY_MODEL_NAME" \
+            "${VALUE_ARG[@]}" \
             --user_id "$USER_ID" \
             --seed "$SEED" \
             --proportion "$PROPORTION" \
@@ -175,9 +240,15 @@ for METHOD in "${METHODS_ARRAY[@]}"; do
             --max_new_tokens "$MAX_NEW_TOKENS" \
             --kl_coef "$KL_COEF" \
             --kl_div "$KL_DIV" \
+            --learning_rate "$LEARNING_RATE" \
+            --total_episodes "$TOTAL_EPISODES" \
             --policy_hub_id "$POLICY_HUB_ID" \
+            "${LORA_ARG[@]}" \
+            "${GRAD_CKPT_ARG[@]}" \
+            "${LOAD_4BIT_ARG[@]}" \
             "${NORM_ARG[@]}" \
-            "${RM_ARGS[@]}"
+            "${RM_ARGS[@]}" \
+            "${METHOD_EXTRA_ARGS[@]}"
         echo ""
         echo "✅ Completed: $METHOD + $POLICY_MODEL_NAME"
         echo "   Policy: $POLICY_HUB_ID"
@@ -194,7 +265,7 @@ echo "Trained policies:"
 for METHOD in "${METHODS_ARRAY[@]}"; do
     for POLICY_MODEL_NAME in "${POLICY_MODEL_NAMES_ARRAY[@]}"; do
         POLICY_MODEL_SUFFIX="${POLICY_MODEL_NAME//\//-}"
-        echo "  - ${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}"
+        echo "  - ${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}${RUN_TAG:+-${RUN_TAG}}"
     done
 done
 echo ""
