@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(source venv/bin/activate)",
-      "Bash(bash -x scripts/build_dataset_seed44.sh)"
-    ]
-  }
-}
