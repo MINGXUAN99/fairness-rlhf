@@ -89,6 +89,8 @@ def parse_args():
                         help="HuggingFace API token (falls back to HF_TOKEN env var or cached login)")
     parser.add_argument("--max_new_tokens", type=int, default=500,
                         help="Maximum number of new tokens per response (or upper bound if --random_max_new_tokens is set)")
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Generation batch size per device. Lower this (e.g. 8) for large 4B policies to avoid OOM.")
     parser.add_argument("--random_max_new_tokens", action="store_true",
                         help="If set: sample max_new_tokens uniformly in [16, max_new_tokens] per batch for length variety. "
                              "Note: variable max per batch can be slower than fixed (dynamic shapes, less GPU kernel reuse).")
@@ -113,8 +115,8 @@ def parse_args():
     # Evaluation mode arguments (only used when mode='evaluation')
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed (evaluation mode only)")
-    parser.add_argument("--method", type=str, default=None, 
-                        choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla"],
+    parser.add_argument("--method", type=str, default=None,
+                        choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla", "pcgrad", "sumgrad", "mgda"],
                         help="Method name (evaluation mode only)")
     parser.add_argument("--proportion", type=float, default=None,
                         help="Minority proportion (evaluation mode, required for maxmin/sharedrep/gold_vanilla/vanilla)")
@@ -124,6 +126,15 @@ def parse_args():
                         help="Alpha value (evaluation mode, default: 1.0)")
     parser.add_argument("--policy_hub_id", type=str, default=None,
                         help="Override policy model hub ID (evaluation mode). If set, load this model instead of deriving from method/proportion/alpha/seed.")
+    parser.add_argument(
+        "--output_hub_id",
+        type=str,
+        default=None,
+        help=(
+            "Override output dataset hub ID. Useful when --policy_hub_id is a local "
+            "model path but evaluation results should still be pushed to a Hub dataset."
+        ),
+    )
     
     return parser.parse_args()
 
@@ -135,7 +146,7 @@ def validate_args(args):
             raise ValueError("--seed is required for evaluation mode")
         if args.method is None:
             raise ValueError("--method is required for evaluation mode")
-        if args.method in ["maxmin", "sharedrep", "vanilla", "gold_vanilla"] and args.proportion is None:
+        if args.method in ["maxmin", "sharedrep", "vanilla", "gold_vanilla", "pcgrad", "sumgrad", "mgda"] and args.proportion is None:
             raise ValueError(f"--proportion is required for {args.method} method")
         if args.method == "sharedrep" and args.k is None:
             raise ValueError("--k is required for sharedrep method")
@@ -176,7 +187,19 @@ def get_model_and_dataset_info(args):
         elif args.method == "vanilla":
             model_name = f"{args.user_id}/{args.method}-imdb-ppo-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
             output_hub_id = f"{args.user_id}/{args.method}-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
-        
+        elif args.method == "pcgrad":
+            model_name = f"{args.user_id}/pcgrad-imdb-ppo-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
+            output_hub_id = f"{args.user_id}/pcgrad-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
+        elif args.method == "sumgrad":
+            model_name = f"{args.user_id}/sumgrad-imdb-ppo-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
+            output_hub_id = f"{args.user_id}/sumgrad-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
+        elif args.method == "mgda":
+            model_name = f"{args.user_id}/mgda-imdb-ppo-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
+            output_hub_id = f"{args.user_id}/mgda-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
+
+        if args.output_hub_id:
+            output_hub_id = args.output_hub_id
+
         dataset_name = "stanfordnlp/imdb"
         dataset_split = "test"
     
@@ -191,8 +214,11 @@ def load_model_with_fallback(model_path, model_name="lvwerra/gpt2-imdb"):
         model_path: Path to model (local or hub)
         model_name: Base model name for config fallback
     """
+    import torch
     try:
-        return AutoModelForCausalLM.from_pretrained(model_path)
+        return AutoModelForCausalLM.from_pretrained(
+            model_path, torch_dtype=torch.bfloat16, trust_remote_code=True
+        )
     except ValueError as e:
         if "model_type" in str(e) or "Unrecognized model" in str(e):
             # Model exists but config is missing model_type - try loading as GPT2
@@ -299,7 +325,7 @@ def main():
     print(f"{'='*60}\n")
     
     # Parameters
-    batch_size = 32  # keep modest to avoid CUDA memory / kernel asserts during generation
+    batch_size = args.batch_size  # keep modest to avoid CUDA memory / kernel asserts during generation
     min_review_length = 200
     input_min_text_length = 2
     input_max_text_length = 8
@@ -313,8 +339,9 @@ def main():
     model.eval()
     
     # Load tokenizer
+    from src.helper.model_utils import configure_tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
-    tokenizer.pad_token = tokenizer.eos_token
+    configure_tokenizer(tokenizer, padding_side="left")
     model.config.pad_token_id = tokenizer.pad_token_id
     
     # Cap max_new_tokens to model context (GPT-2 has 1024 total; prompt uses 8 tokens)
@@ -419,9 +446,12 @@ def main():
     # Push to hub (main process only)
     if accelerator.is_main_process:
         print(f"\nPushing results to {output_hub_id}...")
+        # HF_EVAL_PRIVATE=0 pushes public (needed when the private storage quota
+        # is full). Defaults to private to preserve prior behavior.
+        _eval_private = os.environ.get("HF_EVAL_PRIVATE", "1") != "0"
         Dataset.from_dict(generation_dataset).push_to_hub(
             output_hub_id,
-            private=True,
+            private=_eval_private,
             token=hf_token,
         )
         print(f"✅ Successfully pushed to {output_hub_id}")

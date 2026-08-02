@@ -14,9 +14,16 @@ For each alpha value, this script runs two diagnostics:
    - Sets g_maxmin = g1 if mean(r1) <= mean(r2), else g2  (hard-min).
    - Saves cos(g_maxmin, g1), cos(g_maxmin, g2), cos(g1, g2).
 
-Diagnostic loss for reward r:
-    A = r_norm - beta * (log_pi - log_pi_ref)
-    L = -mean(A.detach() * log_pi)
+Diagnostic loss for reward r (per-gradient beta):
+    g_single / g_obj (vanilla pooled reward): uses beta — matches real PPO direction (reward + KL vs π_ref).
+    g1, g2 (group RMs): beta=0 — pure preference alignment, A = r_norm only (no π_ref / KL).
+
+    When beta > 0 (g_single only):
+        mean_log_pi = sum_log_pi / resp_length
+        A = r_norm - beta * (mean_log_pi - mean_log_pi_ref)
+    When beta = 0 (g1, g2):
+        A = r_norm
+    L = -mean(A.detach() * sum_log_pi)
 
 Rewards are batch-normalised (z-score) across all prompts before constructing
 the loss.  Gradients are computed only over trainable policy parameters (all
@@ -156,8 +163,11 @@ def parse_args() -> argparse.Namespace:
                        "Mini-batch size for generation, reward scoring, and gradient "
                        "accumulation."
                    ))
-    p.add_argument("--beta", type=float, default=0.05,
-                   help="KL penalty coefficient (beta) in the diagnostic loss.")
+    p.add_argument("--beta", type=float, default=0.0,
+                   help=(
+                       "KL coefficient for g_single / g_obj only (PPO-style direction). "
+                       "g1 and g2 always use beta=0 (pure group reward, no π_ref)."
+                   ))
 
     # Reward model scoring
     p.add_argument("--reward_max_length", type=int, default=512,
@@ -424,44 +434,53 @@ def score_texts(
 # Response log-probability
 # ──────────────────────────────────────────────────────────────────────────
 
-def compute_response_log_prob(
+def _response_log_prob_sum_and_length(
     model: AutoModelForCausalLM,
     full_ids: torch.Tensor,  # (B, prompt_len + resp_len)
     prompt_length: int,
     pad_token_id: int,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute the sum of per-token log-probs over response tokens only.
+    Per-sequence sum of response-token log-probs and valid response length.
 
-    Masking: all positions up to and including the first EOS/pad token are
-    counted (so the end-of-response marker is included); everything after the
-    first EOS/pad is excluded.  If no EOS/pad appears in the response, all
-    generated tokens are counted.
+    Masking: positions up to and including the first EOS/pad count; later padding
+    is excluded.
 
-    Returns: (B,) scalar log-prob per sequence.
+    Returns:
+        log_prob_sum: (B,) sum of log pi over valid response tokens
+        resp_length:  (B,) number of valid response tokens (>= 1 for division)
     """
     out = model(input_ids=full_ids)
-    # Upcast to float32 for numerical stability
     log_probs = F.log_softmax(out.logits.float(), dim=-1)  # (B, seq, V)
 
-    # token[t] is predicted by logits[t-1]
-    # response token positions: prompt_length … seq-1
-    # their logit positions:    prompt_length-1 … seq-2
-    response_ids = full_ids[:, prompt_length:]                       # (B, R)
-    response_lp = log_probs[:, prompt_length - 1 : -1, :]           # (B, R, V)
+    response_ids = full_ids[:, prompt_length:]
+    response_lp = log_probs[:, prompt_length - 1 : -1, :]
 
-    # Gather log-prob of the actual token at each response position
     token_lp = response_lp.gather(
         2, response_ids.unsqueeze(-1)
-    ).squeeze(-1)                                                    # (B, R)
+    ).squeeze(-1)
 
-    # Build validity mask: keep positions up to and including the first EOS/pad.
-    # cumsum==0  → before first pad; ==1 → at first pad; >1 → after first pad
-    is_pad = response_ids == pad_token_id                            # (B, R) bool
+    is_pad = response_ids == pad_token_id
     cumsum = is_pad.long().cumsum(dim=1)
-    valid = cumsum <= 1                                              # (B, R) bool
+    valid = cumsum <= 1
 
-    return (token_lp * valid.float()).sum(dim=1)                     # (B,)
+    valid_f = valid.float()
+    log_prob_sum = (token_lp * valid_f).sum(dim=1)
+    resp_length = valid_f.sum(dim=1).clamp(min=1)
+    return log_prob_sum, resp_length
+
+
+def compute_response_log_prob(
+    model: AutoModelForCausalLM,
+    full_ids: torch.Tensor,
+    prompt_length: int,
+    pad_token_id: int,
+) -> torch.Tensor:
+    """Sum of per-token log-probs over response tokens only. Shape (B,)."""
+    log_prob_sum, _ = _response_log_prob_sum_and_length(
+        model, full_ids, prompt_length, pad_token_id
+    )
+    return log_prob_sum
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -501,7 +520,7 @@ def _flatten_grads(params: List[torch.nn.Parameter]) -> torch.Tensor:
 
 def compute_grad(
     policy: AutoModelForCausalLM,
-    ref_policy: AutoModelForCausalLM,
+    ref_policy: Optional[AutoModelForCausalLM],
     raw_rewards: torch.Tensor,               # (N,) CPU
     full_id_batches: List[torch.Tensor],     # list of (B_i, seq_i) on device
     pad_token_id: int,
@@ -511,15 +530,24 @@ def compute_grad(
     Compute the policy gradient under the diagnostic loss:
 
         r_norm = batch_zscore(raw_rewards)
-        A      = r_norm − beta * (log_pi − log_pi_ref)
-        L      = −mean(A.detach() * log_pi)
+        KL uses mean log-prob per response token (matches PPO mean_kl training):
+            mean_log_pi = sum_log_pi / resp_length
+        A      = r_norm − beta * (mean_log_pi − mean_log_pi_ref)
+        L      = −mean(A.detach() * sum_log_pi)   # policy grad still uses sum log_pi
 
     Gradients are accumulated over mini-batches.  Each mini-batch loss is
     weighted by its fraction of the total N so the accumulation equals the
     full-batch mean loss gradient.
 
     Returns: 1-D CPU float gradient vector over trainable policy parameters.
+
+    When beta == 0 or ref_policy is None, the KL term is omitted (A = r_norm only).
     """
+    if beta != 0.0 and ref_policy is None:
+        raise ValueError(
+            "compute_grad: beta != 0 requires a reference policy, but ref_policy is None."
+        )
+
     device = next(policy.parameters()).device
     N = int(raw_rewards.shape[0])
 
@@ -536,20 +564,25 @@ def compute_grad(
         B = batch_ids.shape[0]
         mb_r_norm = r_norm[sample_offset : sample_offset + B].to(device)
 
-        with torch.no_grad():
-            log_pi_ref = compute_response_log_prob(
-                ref_policy, batch_ids, PROMPT_PAD_LEN, pad_token_id
-            )  # (B,)
-
-        # Policy log-prob with gradient
-        log_pi = compute_response_log_prob(
+        log_pi_sum, resp_len = _response_log_prob_sum_and_length(
             policy, batch_ids, PROMPT_PAD_LEN, pad_token_id
-        )  # (B,)
+        )
 
-        A = mb_r_norm - beta * (log_pi - log_pi_ref.to(device))
+        if beta != 0.0 and ref_policy is not None:
+            with torch.no_grad():
+                log_pi_ref_sum, _ = _response_log_prob_sum_and_length(
+                    ref_policy, batch_ids, PROMPT_PAD_LEN, pad_token_id
+                )
+            mean_log_pi = log_pi_sum / resp_len
+            mean_log_pi_ref = log_pi_ref_sum / resp_len
+            kl_penalty = beta * (mean_log_pi - mean_log_pi_ref.to(device))
+        else:
+            kl_penalty = 0.0
+
+        A = mb_r_norm - kl_penalty
 
         # Weight by B/N so that summing over mini-batches gives the full-batch mean
-        L = -(A.detach() * log_pi).sum() * (1.0 / N)
+        L = -(A.detach() * log_pi_sum).sum() * (1.0 / N)
         L.backward()
 
         sample_offset += B
@@ -635,21 +668,23 @@ def run_one_policy(
     # is called inside compute_grad at both the start and end of each call).
     print(f"  [{policy_type}] computing gradients ...")
 
-    g1 = compute_grad(policy, ref_policy, r1_scores, full_id_batches, pad_tok, beta)
-    g2 = compute_grad(policy, ref_policy, r2_scores, full_id_batches, pad_tok, beta)
+    # Group gradients: beta=0 → pure r1/r2 preference direction (no KL / no π_ref)
+    g1 = compute_grad(policy, None, r1_scores, full_id_batches, pad_tok, beta=0.0)
+    g2 = compute_grad(policy, None, r2_scores, full_id_batches, pad_tok, beta=0.0)
+
+    # Worst group is determined by batch-mean reward regardless of policy type
+    worst_group = "r1" if mean_r1 <= mean_r2 else "r2"
 
     if policy_type == "vanilla":
+        # Objective gradient: beta as in PPO (reward + KL vs reference policy)
         g_obj = compute_grad(
             policy, ref_policy, r_single_scores, full_id_batches, pad_tok, beta
         )
         mean_reward_obj = r_single_scores.mean().item()
     else:
-        # MaxMin hard-min: g_maxmin is whichever group has the lower mean reward
-        worst_group = "r1" if mean_r1 <= mean_r2 else "r2"
+        # MaxMin hard-min: g_maxmin equals the gradient of the worst group
         g_obj = g1 if worst_group == "r1" else g2
         mean_reward_obj = min(mean_r1, mean_r2)
-
-    worst_group = "r1" if mean_r1 <= mean_r2 else "r2"
 
     # ── Step 4: cosine similarities & norms ───────────────────────────────
     cos_obj_g1 = cosine_sim(g_obj, g1)
@@ -672,6 +707,125 @@ def run_one_policy(
         "mean_reward_g2": mean_r2,
         "mean_reward_obj":mean_reward_obj,
         "worst_group":    worst_group,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Online diagnostic (in-memory policy, called from training callback)
+# ──────────────────────────────────────────────────────────────────────────
+
+ONLINE_DIAG_FIELDS: List[str] = [
+    "alpha", "step",
+    "cos_single_g1", "cos_single_g2", "cos_g1_g2",
+    "cos_vanilla_g1", "cos_kl_g1", "cos_vanilla_minus_kl_g1",
+    "norm_single", "norm_g1", "norm_g2",
+    "mean_reward_single", "mean_reward_g1", "mean_reward_g2",
+]
+
+
+def run_online_diagnostic(
+    *,
+    policy: AutoModelForCausalLM,
+    ref_policy: Optional[AutoModelForCausalLM],
+    reward_single: AutoModelForSequenceClassification,
+    reward_single_tok: AutoTokenizer,
+    reward_r1: AutoModelForSequenceClassification,
+    reward_r1_tok: AutoTokenizer,
+    reward_r2: AutoModelForSequenceClassification,
+    reward_r2_tok: AutoTokenizer,
+    prompt_ids: torch.Tensor,
+    prompt_mask: torch.Tensor,
+    alpha: float,
+    step: int,
+    beta: float,
+    max_new_tokens: int,
+    batch_size: int,
+    reward_max_length: int,
+    device: torch.device,
+    tokenizer: AutoTokenizer,
+) -> dict:
+    """
+    Run the gradient cosine diagnostic on an already-loaded in-memory policy.
+
+    This is the online counterpart of run_one_policy: it accepts the live
+    policy object directly rather than loading it from a path, and it does NOT
+    delete the policy at the end (the caller owns the model).
+
+    All inner helpers (generate_responses, score_texts, compute_grad,
+    cosine_sim) are the same functions used by the offline script.
+
+    The policy's grad buffers are zeroed before and after the diagnostic.
+    compute_grad itself also calls policy.zero_grad() at entry and exit, so
+    no stale gradients from the diagnostic can affect subsequent PPO updates.
+    The policy is restored to train mode after the diagnostic completes.
+
+    beta applies only to g_single; g1 and g2 use beta=0 (no KL / no ref policy).
+    The returned row also decomposes the single-reward direction into:
+      - g_vanilla: reward-only r_single gradient
+      - g_kl: beta-scaled KL component, defined by
+              g_vanilla_minus_kl = g_vanilla - g_kl
+      - g_vanilla_minus_kl: PPO-style r_single - beta * KL direction
+
+    Returns a dict with keys matching ONLINE_DIAG_FIELDS.
+    """
+    pad_tok = tokenizer.pad_token_id
+    eos_tok = tokenizer.eos_token_id
+
+    # Belt-and-suspenders: clear any gradients accumulated by PPO before we start
+    policy.zero_grad()
+
+    # ── Step 1: generate responses (single pass, no grad) ─────────────────
+    full_id_batches = generate_responses(
+        policy, prompt_ids, prompt_mask,
+        max_new_tokens, batch_size, pad_tok, eos_tok,
+    )
+    texts = decode_all(full_id_batches, tokenizer)
+
+    # ── Step 2: score with all three reward models (no grad) ───────────────
+    r_single_scores = score_texts(
+        reward_single, reward_single_tok, texts, batch_size, reward_max_length, device
+    )
+    r1_scores = score_texts(
+        reward_r1, reward_r1_tok, texts, batch_size, reward_max_length, device
+    )
+    r2_scores = score_texts(
+        reward_r2, reward_r2_tok, texts, batch_size, reward_max_length, device
+    )
+
+    # ── Step 3: compute gradients independently for each reward signal ─────
+    # g_vanilla: reward-only pooled direction.
+    # g_single: beta → real PPO-style direction (r_single - beta * KL vs π_ref).
+    # g_kl: beta-scaled KL component, so g_single = g_vanilla - g_kl.
+    # g1, g2: beta=0 → pure group preference directions (no π_ref).
+    g_vanilla = compute_grad(policy, None, r_single_scores, full_id_batches, pad_tok, beta=0.0)
+    if beta == 0.0:
+        g_single = g_vanilla
+    else:
+        g_single = compute_grad(policy, ref_policy, r_single_scores, full_id_batches, pad_tok, beta)
+    g_kl     = g_vanilla - g_single
+    g1       = compute_grad(policy, None, r1_scores, full_id_batches, pad_tok, beta=0.0)
+    g2       = compute_grad(policy, None, r2_scores, full_id_batches, pad_tok, beta=0.0)
+
+    # ── Step 4: final cleanup — ensure no diagnostic grads remain ──────────
+    policy.zero_grad()
+    policy.train()
+
+    # ── Step 5: cosine similarities & norms ───────────────────────────────
+    return {
+        "alpha":              alpha,
+        "step":               step,
+        "cos_single_g1":      cosine_sim(g_single, g1),
+        "cos_single_g2":      cosine_sim(g_single, g2),
+        "cos_g1_g2":          cosine_sim(g1, g2),
+        "cos_vanilla_g1":     cosine_sim(g_vanilla, g1),
+        "cos_kl_g1":          cosine_sim(g_kl, g1),
+        "cos_vanilla_minus_kl_g1": cosine_sim(g_single, g1),
+        "norm_single":        g_single.norm().item(),
+        "norm_g1":            g1.norm().item(),
+        "norm_g2":            g2.norm().item(),
+        "mean_reward_single": r_single_scores.mean().item(),
+        "mean_reward_g1":     r1_scores.mean().item(),
+        "mean_reward_g2":     r2_scores.mean().item(),
     }
 
 
@@ -705,14 +859,20 @@ def main() -> None:
 
     prompt_ids, prompt_mask = tokenize_prompts(prompts, policy_tokenizer, device)
 
-    # ── Open output CSV ────────────────────────────────────────────────────
+    # ── Open output CSV (append; write header only if file is new/empty) ───
     out_dir = os.path.dirname(os.path.abspath(args.output_path))
     os.makedirs(out_dir, exist_ok=True)
-    out_file = open(args.output_path, "w", newline="")
+    write_header = (
+        not os.path.exists(args.output_path)
+        or os.path.getsize(args.output_path) == 0
+    )
+    out_file = open(args.output_path, "a", newline="")
     writer = csv.DictWriter(out_file, fieldnames=CSV_FIELDS)
-    writer.writeheader()
+    if write_header:
+        writer.writeheader()
     out_file.flush()
-    print(f"\nResults will be written to: {args.output_path}")
+    mode = "appending to" if not write_header else "writing to"
+    print(f"\nResults will be {mode}: {args.output_path}")
 
     # ── Per-alpha loop ─────────────────────────────────────────────────────
     for alpha in args.alphas:

@@ -1,7 +1,20 @@
+import sys, os
+FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.path.join(FILE_DIR, "../../.."))
+sys.path.insert(0, ROOT)
+
 import argparse
 from trl import RewardConfig, RewardTrainer
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from src.helper.model_utils import (
+    configure_tokenizer,
+    freeze_backbone as freeze_backbone_fn,
+    build_lora_config,
+    default_lora_target_modules,
+    add_lora_cli_args,
+    resolve_use_lora,
+)
 
 
 def parse_args():
@@ -16,7 +29,8 @@ def parse_args():
     parser.add_argument("--hub_model_id", type=str, required=True,
                         help="Hugging Face hub model id for pushing the trained reward model (e.g. {user_id}/maxmin-imdb-reward-ALPHA1.0-len512-minority-gpt2).")
     parser.add_argument("--model_hub_id", type=str, default="gpt2",
-                        help="Hugging Face model id for the backbone (e.g. gpt2, lvwerra/gpt2-imdb). Default: gpt2.")
+                        help="Hugging Face model id for the backbone (e.g. gpt2, lvwerra/gpt2-imdb, EleutherAI/pythia-160m, meta-llama/Llama-3.2-1B, Qwen/Qwen3-4B-Base). Default: gpt2.")
+    add_lora_cli_args(parser)
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -49,30 +63,42 @@ if __name__ == "__main__":
     # Reward Params
     num_labels = 1
     backbone_model_id = args.model_hub_id
-    freeze_backbone = True
     output_hub_id = args.hub_model_id
+    use_lora = resolve_use_lora(args.use_lora, backbone_model_id)
+    # HF repo privacy: HF_PRIVATE=0 pushes public (needed when the private
+    # storage quota is full). Defaults to private to preserve prior behavior.
+    _hf_private = os.environ.get("HF_PRIVATE", "1") != "0"
 
     # Reward Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(backbone_model_id)
-    tokenizer.pad_token = tokenizer.eos_token
+    configure_tokenizer(tokenizer)
 
-    # Reward Model
-    model = AutoModelForSequenceClassification.from_pretrained(backbone_model_id, num_labels=num_labels)
+    # Reward Model. bf16 keeps a 4B backbone light enough for a single 32GB GPU.
+    import torch
+    model = AutoModelForSequenceClassification.from_pretrained(
+        backbone_model_id, num_labels=num_labels,
+        torch_dtype=torch.bfloat16, trust_remote_code=True,
+    )
     model.config.pad_token_id = tokenizer.pad_token_id
-    
-    # Freeze Backbone (GPT-2 uses .transformer, Qwen/LLaMA use .model)
-    if hasattr(model, "model"):
-        backbone = model.model
-    elif hasattr(model, "transformer"):
-        backbone = model.transformer
+
+    if use_lora:
+        from peft import get_peft_model
+        lora_config = build_lora_config(
+            task_type="SEQ_CLS",
+            r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
+            target_modules=default_lora_target_modules(model),
+            modules_to_save=["score"],
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
     else:
-        raise AttributeError(f"{type(model).__name__} has no 'model' or 'transformer' attribute for freezing")
-    for param in backbone.parameters():
-        param.requires_grad = False
+        # Linear-probe reward model: freeze backbone, train only the score head.
+        freeze_backbone_fn(model)
 
     # Training config
     training_args = RewardConfig(
         per_device_train_batch_size=16,
+        bf16=True,
         learning_rate=1e-4,
         num_train_epochs=4,
         logging_steps=10,
@@ -83,7 +109,7 @@ if __name__ == "__main__":
         run_name=output_hub_id,
         push_to_hub=True,
         hub_model_id=output_hub_id,
-        hub_private_repo=True,
+        hub_private_repo=_hf_private,
         ddp_find_unused_parameters=False,
     )
 
@@ -102,7 +128,19 @@ if __name__ == "__main__":
     metrics = trainer.evaluate()
     trainer.log_metrics("eval", metrics)
 
-    # Push to hub
-    trainer.push_to_hub(
-        dataset_name=dataset_name,
-    )
+    # Push to hub. For LoRA, merge adapters so downstream loaders (PPO MaxMin
+    # wrapper, normalization) can use a plain AutoModelForSequenceClassification.
+    if use_lora:
+        merged = trainer.accelerator.unwrap_model(trainer.model).merge_and_unload()
+        merged.config.pad_token_id = tokenizer.pad_token_id
+        merged.push_to_hub(output_hub_id, private=_hf_private)
+        tokenizer.push_to_hub(output_hub_id, private=_hf_private)
+    else:
+        trainer.push_to_hub(
+            dataset_name=dataset_name,
+        )
+
+    # Both paths push a plain AutoModel; remove any stale PEFT adapter left over
+    # from a prior run reusing this repo name (else it hijacks AutoModel loading).
+    from src.helper.model_utils import cleanup_stale_hub_files
+    cleanup_stale_hub_files(output_hub_id, ["adapter_config.json", "adapter_model.safetensors"])

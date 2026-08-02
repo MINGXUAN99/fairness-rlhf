@@ -18,7 +18,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate RLHF methods - score responses")
     parser.add_argument("--user_id", type=str, required=True, help="Hugging Face user ID")
     parser.add_argument("--seed", type=int, required=True, help="Random seed")
-    parser.add_argument("--method", type=str, required=True, choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla"],
+    parser.add_argument("--method", type=str, required=True, choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla", "pcgrad", "sumgrad", "mgda"],
                         help="Method name")
     parser.add_argument("--proportion", type=float, default=None,
                         help="Minority proportion (required for maxmin/sharedrep/vanilla)")

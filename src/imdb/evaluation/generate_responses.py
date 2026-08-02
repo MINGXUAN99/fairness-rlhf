@@ -18,7 +18,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate RLHF methods - generate responses")
     parser.add_argument("--user_id", type=str, required=True, help="Hugging Face user ID")
     parser.add_argument("--seed", type=int, required=True, help="Random seed")
-    parser.add_argument("--method", type=str, required=True, choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla"],
+    parser.add_argument("--method", type=str, required=True, choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla", "pcgrad", "sumgrad", "mgda"],
                         help="Method name")
     parser.add_argument("--proportion", type=float, default=None,
                         help="Minority proportion (required for maxmin/sharedrep/vanilla)")
@@ -28,6 +28,15 @@ def parse_args():
                         help="Alpha value (default: 1.0)")
     parser.add_argument("--policy_hub_id", type=str, default=None,
                         help="Override policy model hub ID. If set, load this model instead of deriving from method/proportion/alpha/seed.")
+    parser.add_argument(
+        "--output_hub_id",
+        type=str,
+        default=None,
+        help=(
+            "Override output evaluation dataset Hub ID. Useful when --policy_hub_id "
+            "points to a local model directory."
+        ),
+    )
     parser.add_argument("--max_new_tokens", type=int, default=128,
                         help="Maximum new tokens per response during evaluation (default: 128).")
     return parser.parse_args()
@@ -55,6 +64,9 @@ if __name__ == "__main__":
     
     if args.policy_hub_id is not None:
         sys.argv.extend(["--policy_hub_id", args.policy_hub_id])
+
+    if args.output_hub_id is not None:
+        sys.argv.extend(["--output_hub_id", args.output_hub_id])
     
     sys.argv.extend(["--max_new_tokens", str(args.max_new_tokens)])
     

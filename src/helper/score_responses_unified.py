@@ -83,7 +83,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed (evaluation mode only)")
     parser.add_argument("--method", type=str, default=None,
-                        choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla"],
+                        choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla", "pcgrad", "sumgrad", "mgda"],
                         help="Method name (evaluation mode only)")
     parser.add_argument("--proportion", type=float, default=None,
                         help="Minority proportion (evaluation mode, required for maxmin/sharedrep/gold_vanilla/vanilla)")
@@ -104,7 +104,7 @@ def validate_args(args):
             raise ValueError("--seed is required for evaluation mode")
         if args.method is None:
             raise ValueError("--method is required for evaluation mode")
-        if args.method in ["maxmin", "sharedrep", "vanilla", "gold_vanilla"] and args.proportion is None:
+        if args.method in ["maxmin", "sharedrep", "vanilla", "gold_vanilla", "pcgrad", "sumgrad", "mgda"] and args.proportion is None:
             raise ValueError(f"--proportion is required for {args.method} method")
         if args.method == "sharedrep" and args.k is None:
             raise ValueError("--k is required for sharedrep method")
@@ -133,6 +133,12 @@ def get_dataset_info(args):
             return f"{args.user_id}/{args.method}-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}-k{args.k}"
         elif args.method == "vanilla":
             return f"{args.user_id}/{args.method}-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
+        elif args.method == "pcgrad":
+            return f"{args.user_id}/pcgrad-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
+        elif args.method == "sumgrad":
+            return f"{args.user_id}/sumgrad-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
+        elif args.method == "mgda":
+            return f"{args.user_id}/mgda-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
 
 
 def tokenize_dataset_mode(example, tokenizer, num_responses=2):
@@ -451,8 +457,9 @@ def main():
             dataset = dataset.add_column("positiveness_z", pos_z)
             dataset = dataset.add_column("conciseness_z", conc_z)
         
-        # Push to hub
-        dataset.push_to_hub(dataset_name, private=True)
+        # Push to hub. HF_EVAL_PRIVATE=0 pushes public (needed when the private
+        # storage quota is full). Defaults to private to preserve prior behavior.
+        dataset.push_to_hub(dataset_name, private=(os.environ.get("HF_EVAL_PRIVATE", "1") != "0"))
         if args.mode == "evaluation" and accelerator.is_main_process:
             sync_dataset_card_readme(dataset, dataset_name)
         print(f"✅ Successfully pushed scores to {dataset_name}")

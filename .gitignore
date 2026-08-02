@@ -14,6 +14,11 @@ trainer_output/
 wandb/
 logs/
 calibration/
+images/
+results/
+scripts/
+tests/
+local_models/
 *.log
 
 # Model weights (if saved locally)
@@ -40,6 +45,8 @@ coverage.xml
 .vscode/
 .idea/
 .cursor/
+.conda/
+.claude/
 
 # OS
 .DS_Store
