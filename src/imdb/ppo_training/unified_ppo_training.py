@@ -787,6 +787,9 @@ def _pcgrad_compute_and_apply(
     accelerator.backward(pg_loss_r2, retain_graph=True)
     g2_flat = _flat_policy_grads()
 
+    if accelerator.is_main_process:
+        _sumgrad_record_cosine(g1_flat, g2_flat)
+
     # ── PCGrad projection ─────────────────────────────────────────────────
     g1_proj, g2_proj = pcgrad_project_2(g1_flat, g2_flat)
     g_pcgrad = g1_proj + g2_proj      # combined projected policy gradient
@@ -1072,12 +1075,8 @@ def _windowed_pcgrad_compute_and_apply(
         plain vector sum (g1 + g2)  — identical to SumGrad / surgery OFF.
 
     A `None` bound means "unbounded" on that side (start=None → from step 1;
-    end=None → until the final step). This dissociates WHEN the gradient conflict
-    is resolved from WHETHER the persistent collapse is prevented:
-      - PCGrad only in the early conflict window (e.g. 1-400) rescuing the run
-        ⇒ the transient early conflict is the causal driver (effect locks in early).
-      - PCGrad only after the conflict has subsided (e.g. 500-800) failing to
-        rescue ⇒ intervening after onset is too late.
+    end=None → until the final step). This tests the effect of intervention
+    timing; the outcome alone does not establish irreversibility or a mechanism.
 
     cos(g1, g2) is recorded every update (when --sumgrad_cosine_csv is set) so the
     conflict trajectory — and the effect of turning surgery on/off — is captured.
@@ -2273,8 +2272,8 @@ def parse_args():
             "reward model as a GUARD and, inside the intervention window, project the "
             "pooled vanilla PPO update to remove its component that conflicts with the "
             "minority gradient g1 (deconflict-only; g1 is never added as an objective). "
-            "Outside the window (and everywhere when no window is set spans it) the update "
-            "is standard vanilla. Combine with --pcgrad_window_start/--pcgrad_window_end "
+            "Outside the window the update is standard vanilla. "
+            "Combine with --pcgrad_window_start/--pcgrad_window_end "
             "for early/late windows; omit both for deconflict on every step. The guard RM "
             "defaults to the maxmin minority RM (override via --maxmin_minority_rm_hub_id)."
         ),
@@ -2287,8 +2286,9 @@ def parse_args():
             "Windowed intervention (pcgrad, or vanilla with --vanilla_deconflict): "
             "first PPO update (1-indexed, "
             "inclusive; == global_step) at which PCGrad conflict-projection is applied. "
-            "Outside [start, end] the two group gradients are plain-summed (no surgery, "
-            "== sumgrad). Omit for unbounded-below (from step 1). Setting either "
+            "Outside [start, end], pcgrad plain-sums the two group gradients "
+            "(SumGrad); vanilla deconfliction retains the pooled gradient. "
+            "Omit for unbounded-below (from step 1). Setting either "
             "--pcgrad_window_start or --pcgrad_window_end enables windowed mode."
         ),
     )
@@ -2297,8 +2297,9 @@ def parse_args():
         type=int,
         default=None,
         help=(
-            "Windowed-PCGrad (pcgrad method only): last PPO update (inclusive) at which "
-            "PCGrad projection is applied. Omit for unbounded-above (until the final step)."
+            "Windowed intervention (pcgrad, or vanilla with --vanilla_deconflict): "
+            "last PPO update (inclusive) eligible for projection. "
+            "Omit for unbounded-above (until the final step)."
         ),
     )
     parser.add_argument("--kl_div", type=str, default="mean_kl", choices=["total", "mean_kl"],
@@ -2588,6 +2589,8 @@ if __name__ == "__main__":
             _sumgrad_config["normalize"] = args.sumgrad_normalize
             if args.sumgrad_cosine_csv and accelerator.is_main_process:
                 _sumgrad_diag["csv_path"] = args.sumgrad_cosine_csv
+        if args.method == "pcgrad" and args.sumgrad_cosine_csv and accelerator.is_main_process:
+            _sumgrad_diag["csv_path"] = args.sumgrad_cosine_csv
         if args.method == "mgda":
             _mgda_config["normalize"] = args.mgda_normalize
             if args.sumgrad_cosine_csv and accelerator.is_main_process:

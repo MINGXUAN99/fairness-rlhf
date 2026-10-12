@@ -118,10 +118,18 @@ NO_REWARD_NORM="${NO_REWARD_NORM:-1}"
 # MGDA only: mean-norm rescale the two group gradients before the min-norm solve
 # (recommended when the minority/majority RMs differ in reward scale). MGDA_NORMALIZE=1 to enable.
 MGDA_NORMALIZE="${MGDA_NORMALIZE:-0}"
-# sumgrad/mgda only: record cos(g1, g2) between the minority/majority objective
+# pcgrad/sumgrad/mgda: record cos(g1, g2) between the minority/majority objective
 # gradients every update to a CSV under diagnostics/ (gradient-conflict trace).
 # RECORD_COSINE=1 to enable.
 RECORD_COSINE="${RECORD_COSINE:-0}"
+# PCGrad only: inclusive OUTER PPO update bounds. Empty means unbounded.
+# Outside the window use SumGrad; omit both for full PCGrad.
+PCGRAD_WINDOW_START="${PCGRAD_WINDOW_START:-}"
+PCGRAD_WINDOW_END="${PCGRAD_WINDOW_END:-}"
+WINDOW_SUFFIX=""
+if [ -n "$PCGRAD_WINDOW_START" ] || [ -n "$PCGRAD_WINDOW_END" ]; then
+    WINDOW_SUFFIX="-win${PCGRAD_WINDOW_START:-1}-${PCGRAD_WINDOW_END:-end}"
+fi
 
 # HuggingFace token for private repos (export HF_TOKEN or run: hf auth login)
 # Python/transformers use HF_TOKEN automatically for from_pretrained/push_to_hub
@@ -143,6 +151,14 @@ fi
 # Methods and alphas (space-separated for multiple)
 METHODS="${METHODS:-vanilla maxmin}"
 METHODS_ARRAY=($METHODS)
+if [ -n "$WINDOW_SUFFIX" ]; then
+    for METHOD in "${METHODS_ARRAY[@]}"; do
+        if [ "$METHOD" != "pcgrad" ]; then
+            echo "ERROR: PCGRAD_WINDOW_START/END require METHODS=pcgrad."
+            exit 1
+        fi
+    done
+fi
 ALPHAS="${ALPHAS:-1.0}"
 ALPHAS_ARRAY=($ALPHAS)
 
@@ -211,17 +227,22 @@ for METHOD in "${METHODS_ARRAY[@]}"; do
 
         # Sanitize model name for hub ID (replace / with -)
         POLICY_MODEL_SUFFIX="${POLICY_MODEL_NAME//\//-}"
-        POLICY_HUB_ID="${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}${RUN_TAG:+-${RUN_TAG}}"
+        POLICY_HUB_ID="${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}${WINDOW_SUFFIX}${RUN_TAG:+-${RUN_TAG}}"
 
         # Method-specific extra args (MGDA normalization + gradient-conflict CSV).
         METHOD_EXTRA_ARGS=()
+        if [ "$METHOD" = "pcgrad" ] && [ -n "$WINDOW_SUFFIX" ]; then
+            [ -n "$PCGRAD_WINDOW_START" ] && METHOD_EXTRA_ARGS+=(--pcgrad_window_start "$PCGRAD_WINDOW_START")
+            [ -n "$PCGRAD_WINDOW_END" ] && METHOD_EXTRA_ARGS+=(--pcgrad_window_end "$PCGRAD_WINDOW_END")
+            echo "PCGrad window:  [${PCGRAD_WINDOW_START:-1}, ${PCGRAD_WINDOW_END:-end}] inclusive; SumGrad outside"
+        fi
         if [ "$METHOD" = "mgda" ] && [ "$MGDA_NORMALIZE" = "1" ]; then
             METHOD_EXTRA_ARGS+=(--mgda_normalize)
             echo "MGDA:            mean-norm rescale before min-norm solve (--mgda_normalize)"
         fi
-        if { [ "$METHOD" = "mgda" ] || [ "$METHOD" = "sumgrad" ]; } && [ "$RECORD_COSINE" = "1" ]; then
+        if { [ "$METHOD" = "pcgrad" ] || [ "$METHOD" = "mgda" ] || [ "$METHOD" = "sumgrad" ]; } && [ "$RECORD_COSINE" = "1" ]; then
             mkdir -p "$PROJECT_ROOT/diagnostics"
-            COSINE_CSV="diagnostics/cosine_${METHOD}-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}${RUN_TAG:+-${RUN_TAG}}.csv"
+            COSINE_CSV="diagnostics/cosine_${METHOD}-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}${WINDOW_SUFFIX}${RUN_TAG:+-${RUN_TAG}}.csv"
             METHOD_EXTRA_ARGS+=(--sumgrad_cosine_csv "$COSINE_CSV")
             echo "Conflict CSV:    $COSINE_CSV"
         fi
@@ -265,7 +286,7 @@ echo "Trained policies:"
 for METHOD in "${METHODS_ARRAY[@]}"; do
     for POLICY_MODEL_NAME in "${POLICY_MODEL_NAMES_ARRAY[@]}"; do
         POLICY_MODEL_SUFFIX="${POLICY_MODEL_NAME//\//-}"
-        echo "  - ${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}${RUN_TAG:+-${RUN_TAG}}"
+        echo "  - ${USER_ID}/${METHOD}-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-${KL_SUFFIX}${KL_COEF}-${POLICY_MODEL_SUFFIX}${WINDOW_SUFFIX}${RUN_TAG:+-${RUN_TAG}}"
     done
 done
 echo ""
