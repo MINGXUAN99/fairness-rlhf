@@ -1,0 +1,39 @@
+method,alpha,worst_group_reward,std,source,note,proxy_std,mean_kind
+Vanilla,0.5,0.904984,0.129291,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+Vanilla,0.6,0.930043,0.057989,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+Vanilla,0.7,0.921438,0.034886,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+Vanilla,0.75,0.260682,0.071008,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+Vanilla,0.8,0.197211,0.014476,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+Vanilla,0.9,0.100163,0.015464,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+Vanilla,1.0,0.000040,0.006266,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+Vanilla,1.1,-0.098313,,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",original notebook interpolates this point; uncertainty unavailable,,interpolated
+Vanilla,1.2,-0.169409,0.154543,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+Vanilla,1.3,-0.261809,0.158188,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,0.5,0.905377,0.132402,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,0.6,0.925908,0.123739,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,0.7,0.938160,0.049158,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,0.75,0.941125,0.147331,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,0.8,0.840620,0.224182,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,0.9,0.928925,0.020218,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,1.0,0.692883,0.325629,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,1.1,0.728615,0.371635,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,1.2,0.180595,0.469420,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+MaxMin,1.3,-0.271799,0.140059,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+PCGrad,0.5,0.922150,0.120510,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+PCGrad,0.6,0.948639,0.105088,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+PCGrad,0.7,0.940144,0.134417,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+PCGrad,0.8,0.910494,0.186495,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+PCGrad,0.9,0.913429,0.208647,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+PCGrad,1.0,0.902645,0.236139,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+PCGrad,1.1,0.868663,0.287570,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+PCGrad,1.2,0.834638,0.334570,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+PCGrad,1.3,0.432043,0.515363,"10802_Not_All_Heterogeneity_Is.pdf, Figure 1, page 3",vector-recovered mean and original error-bar half-height,,vector_recovered
+SumGrad,0.5,0.960,,Linear extrapolation from SumGrad rebuttal means at alpha 0.6 and 0.8,extrapolated mean; not an experimental measurement; proxy error-bar half-height = 0.8 * PCGrad std at same alpha; SumGrad std unknown,0.0964080,extrapolated
+SumGrad,0.6,0.939,,"Rebuttal EMNLP26 RLHF.pdf, W1 table, page 12 (also pages 6-7)",reported mean; uncertainty not reported; proxy error-bar half-height = 0.8 * PCGrad std at same alpha; SumGrad std unknown,0.0840704,reported
+SumGrad,0.7,0.918,,Linear interpolation from SumGrad rebuttal means at alpha 0.6 and 0.8,interpolated mean; not an experimental measurement; proxy error-bar half-height = 0.8 * PCGrad std at same alpha; SumGrad std unknown,0.1075336,interpolated
+SumGrad,0.8,0.897,,"Rebuttal EMNLP26 RLHF.pdf, W1 table, page 12 (also pages 6-7)",reported mean; uncertainty not reported; proxy error-bar half-height = 0.8 * PCGrad std at same alpha; SumGrad std unknown,0.1491960,reported
+SumGrad,0.9,0.8595,,Linear interpolation from SumGrad rebuttal means at alpha 0.8 and 1.0,interpolated mean; not an experimental measurement; proxy error-bar half-height = 0.8 * PCGrad std at same alpha; SumGrad std unknown,0.1669176,interpolated
+SumGrad,1.0,0.822,,"Rebuttal EMNLP26 RLHF.pdf, W1 table, page 12 (also pages 6-7)",reported mean; uncertainty not reported; proxy error-bar half-height = 0.8 * PCGrad std at same alpha; SumGrad std unknown,0.1889112,reported
+SumGrad,1.1,0.819,,"Rebuttal EMNLP26 RLHF.pdf, W1 table, page 12 (also pages 6-7)",reported mean; uncertainty not reported; proxy error-bar half-height = 0.8 * PCGrad std at same alpha; SumGrad std unknown,0.2300560,reported
+SumGrad,1.2,-0.106,,"Rebuttal EMNLP26 RLHF.pdf, W1 table, page 12 (also pages 6-7)",reported mean; uncertainty not reported; proxy error-bar half-height = 0.8 * PCGrad std at same alpha; SumGrad std unknown,0.2676560,reported
+SumGrad,1.3,-0.073,,"Rebuttal EMNLP26 RLHF.pdf, W1 table, page 12 (also pages 6-7)",reported mean; uncertainty not reported; proxy error-bar half-height = 0.8 * PCGrad std at same alpha; SumGrad std unknown,0.4122904,reported

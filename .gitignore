@@ -11,6 +11,8 @@ build/
 
 # Training outputs
 trainer_output/
+output/
+tmp/
 wandb/
 logs/
 calibration/
