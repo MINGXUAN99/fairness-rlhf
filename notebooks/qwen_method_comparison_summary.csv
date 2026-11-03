@@ -1,4 +1,0 @@
-method,positiveness,conciseness,minority_score,majority_score,worst_group,overall_performance,score_gap,n
-Vanilla,0.9948,0.4935,0.4935,0.9948,0.4935,0.8946,0.5013,24872
-MaxMin,0.6956,0.4515,0.4515,0.6956,0.4515,0.6468,0.2442,24872
-PCGrad,0.705,0.5004,0.5004,0.705,0.5004,0.6641,0.2046,24872
