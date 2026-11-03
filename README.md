@@ -1,313 +1,196 @@
-# Fairness-RLHF
+# Not All Reward Heterogeneity is Value Conflict: Gradient Interference in Group-Aware RLHF
 
-Fairness-aware Reinforcement Learning from Human Feedback on the IMDb sentiment dataset. This project implements and compares four RLHF methods with different reward modeling strategies, focusing on group fairness across sub-populations with diverse preferences.
+Research code for studying how heterogeneous preferences become policy updates in reinforcement learning from human feedback (RLHF). On a controlled IMDb benchmark, we distinguish **value-level conflict** between group preferences from **optimization-level interference** between their learning signals.
 
-Based on [sharedrep-rlhf](https://github.com/marcellobullo/sharedrep-rlhf), with the MaxMin-RLHF component replicating [MaxMinRLHF](https://github.com/CharlesQ9/MaxMinRLHF).
+## Overview
 
-**Key references:**
+Poor minority alignment does not necessarily imply an unavoidable trade-off between groups. The manuscript reports three main findings:
 
-- MaxMin-RLHF: [Maxmin-RLHF: Alignment with Diverse Human Preferences](https://arxiv.org/abs/2402.08925)
-- SharedRep-RLHF: [Shared Representations in RLHF](https://arxiv.org/abs/2509.03672)
+- **Minority collapse can occur while group rewards remain positively correlated.** Vanilla RLHF exhibits a sharp decline near preference divergence \(\alpha = 0.75\), where the measured reward correlation is approximately 0.65.
+- **Harmful gradient alignment is strongest early in training.** PPO updates initially oppose minority reward improvement; later positive alignment does not necessarily restore minority performance.
+- **How group gradients are combined matters.** Worst-group selection and direct gradient summation help under moderate heterogeneity, while gradient conflict correction method (PCGrad and MGDA) retain stronger worst-group performance under larger divergence.
+
+These findings concern synthetic preference groups in a controlled benchmark. Positive reward correlation alone does not establish that every policy update can improve both groups, and the experiments do not characterize the full Pareto frontier.
+
+## Benchmark
+
+Prompts are the first 2–8 tokens of IMDb reviews. Candidate responses are generated using `lvwerra/gpt2-imdb` and scored along two attributes:
+
+- **Positive sentiment** $r_s$: the positive-class score from `lvwerra/distilbert-imdb`.
+- **Conciseness** $r_c$: a score derived from response length.
+
+The population contains 80% majority preferences and 20% minority preferences. Their oracle rewards are
+
+$$
+r_{\mathrm{maj}} = \alpha r_s + (1-\alpha)r_c,
+\qquad
+r_{\mathrm{min}} = (1-\alpha)r_s + \alpha r_c.
+$$
+
+The manuscript varies $\alpha$ from 0.5 to 1.3. At 0.5 the rewards are identical; at 1.0 each group values a different attribute; above 1.0 each group assigns a negative coefficient to the other attribute. The measured reward correlation becomes negative in this last regime.
+
+Policy optimization uses **mean per-token KL** regularization to reduce confounding from response length. Evaluation reports oracle group rewards, worst-group reward $F=\min(J_{\mathrm{min}},J_{\mathrm{maj}})$, and population utility $U=0.2J_{\mathrm{min}}+0.8J_{\mathrm{maj}}$.
 
 ## Methods
 
-| Method | Reward Model | PPO Objective | Description |
-|--------|-------------|---------------|-------------|
-| **Vanilla** | Single GPT-2 reward head trained on all data | Standard PPO with learned reward | Baseline RLHF without fairness considerations |
-| **MaxMin** | Two separate GPT-2 reward heads (minority + majority) | Batch-level worst-group selection | Optimizes for the worst-off group per Algorithm 1 of MaxMin-RLHF |
-| **SharedRep** | Single GPT-2 backbone with multiple group-specific heads | Batch-level worst-head selection | Shared representation with per-group reward heads and MaxMin objective |
-| **Gold** | Pre-trained sentiment classifier (`lvwerra/distilbert-imdb`) | Batch-level worst-group selection using analytical scores | Uses known group preference formulas (no learned reward model) |
+All main methods use PPO to train policy. Group-aware methods share the same separately trained minority and majority reward models.
 
-### Group Preferences
+| Method | CLI value | Policy update |
+|---|---|---|
+| Vanilla RLHF | `vanilla` | Optimize one reward model trained on pooled preferences. |
+| MaxMin-RLHF | `maxmin` | Select the group with the lowest **batch-mean** learned reward and use its rewards for the entire batch. |
+| SumGrad | `sumgrad` | Sum both group-specific PPO gradients without projection. |
+| PCGrad-PPO | `pcgrad` | Project conflicting components out of both group gradients, then sum them. |
+| MGDA-PPO | `mgda` | Compute the minimum-norm convex combination of the two group gradients. |
 
-Two simulated sub-populations are defined by their preference over two traits:
+For SumGrad, PCGrad, and MGDA, the KL-related policy gradient is added separately after combining group gradients. The value model uses the standard PPO value loss. MGDA uses unnormalized group gradients by default (`MGDA_NORMALIZE=0`).
 
-- **Positiveness**: Sentiment score from a DistilBERT classifier, in \[0, 1\]
-- **Conciseness**: `1 - normalized_length`, where `normalized_length = clamp(token_length / max_length, 0, 1)`
+### Worst-group performance across preference divergence
 
-The `alpha` parameter controls preference strength:
+[![Worst-group reward versus alpha for Vanilla RLHF, MaxMin-RLHF, and PCGrad-PPO](notebooks/ppo_by_alpha_worst.png)](notebooks/ppo_by_alpha_worst.pdf)
 
-- **Minority group**: `score = conciseness * alpha + positiveness * (1 - alpha)`
-- **Majority group**: `score = conciseness * (1 - alpha) + positiveness * alpha`
+Vanilla RLHF exhibits worst-group collapse while group rewards remain positively correlated. MaxMin improves performance under moderate divergence, while PCGrad maintains higher worst-group rewards as preferences become more conflicting. Click the figure to open the vector PDF.
 
-When `alpha = 1.0`, minority cares only about conciseness and majority only about positiveness. When `alpha = 0.5`, both groups have identical preferences.
-
-### MaxMin Objective
-
-All fairness-aware methods (maxmin, sharedrep, gold) implement Algorithm 1 from the MaxMin-RLHF paper:
-
-```
-max_policy  min_group  E[reward_group(response)]
-```
-
-At each PPO step, this is approximated by **batch-level group selection**: compute the mean reward per group across the batch, select the group with the lowest mean, and use that group's per-sample rewards for the PPO update.
-
-## Project Structure
-
-```
-fairness-rlhf/
-├── scripts/                          # Shell scripts for running the full pipeline
-│   ├── train_all_reward_models.sh    # Train vanilla + maxmin reward models
-│   ├── train_all_ppo_policy.sh       # Train PPO policies (vanilla + maxmin)
-│   └── evaluate_ppo_policies.sh      # Generate & score evaluation responses
-│
-├── src/
-│   ├── helper/                       # Shared utilities
-│   │   ├── imdb_utils.py             # IMDb preprocessing, length scoring
-│   │   ├── generate_responses_unified.py  # Unified response generation logic
-│   │   ├── score_responses_unified.py     # Unified response scoring logic
-│   │   └── sharedrep_reward_trainer.py    # Custom RewardTrainer for SharedRep
-│   │
-│   ├── models/
-│   │   └── sr_gpt2/                  # SharedRep GPT-2 reward model
-│   │       ├── sr_gpt2_configuration.py   # Model config (n_heads, k, maxmin flag)
-│   │       └── sr_gpt2_modeling.py        # SharedRepGPT2RM: shared backbone + group heads
-│   │
-│   └── imdb/                         # IMDb experiment code
-│       ├── dataset/                  # Dataset preparation (Step 1)
-│       │   ├── generate_responses.py       # Generate k responses per prompt
-│       │   ├── score_responses.py          # Score responses (positiveness + length)
-│       │   └── create_chosen_rejected.py   # Create preference pairs per group
-│       │
-│       ├── reward_training/          # Reward model training (Step 2)
-│       │   ├── vanilla_reward_training.py      # Single reward model on all data
-│       │   ├── maxmin_reward_training.py        # Per-group reward models (--group 0/1)
-│       │   └── sharedrep_reward_training.py     # SharedRep multi-head reward model
-│       │
-│       ├── ppo_training/             # PPO policy training (Step 3)
-│       │   └── unified_ppo_training.py     # Unified entry point for all methods
-│       │
-│       └── evaluation/               # Policy evaluation (Step 4)
-│           ├── generate_responses.py       # Generate responses from trained policy
-│           ├── score_responses.py          # Score generated responses
-│           └── read_evaluation_scores.py   # Analyze and display evaluation metrics
-│
-├── notebooks/
-│   └── analyze_ppo_evaluations.ipynb # Analysis notebook
-│
-├── accelerate_config.yaml            # Single-GPU accelerate config
-└── requirements.txt                  # Python dependencies
-```
+The manuscript additionally compares Vanilla, MaxMin, and PCGrad on Pythia-160M and Llama-3.2-1B at α = 1.0, observing minority collapse and recovery beyond GPT-2.
 
 ## Setup
 
-1. Create and activate a Python environment:
+The training scripts target Linux with Bash and an NVIDIA GPU. The manuscript used one RTX 5090 GPU per run on Ubuntu 24.04.3 with CUDA 12.8.
+
+Create an environment and install the dependencies:
 
 ```bash
-conda create -n rlhf python=3.13
-conda activate rlhf
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-2. Install dependencies:
+Authenticate with Hugging Face and Weights & Biases:
 
 ```bash
-pip install -r requirements.txt
-```
-
-3. Log in to Hugging Face and Weights & Biases:
-
-```bash
-huggingface-cli login
+hf auth login
 wandb login
 ```
 
-## Training Pipeline
-
-The full pipeline has four stages. Each stage uploads artifacts to the Hugging Face Hub.
-
-### Step 1: Dataset Preparation
-
-Generate multiple responses per IMDb prompt and score them:
-
 ```bash
-# Generate k=2 responses per prompt from the base GPT-2 model
-python src/imdb/dataset/generate_responses.py \
-    --user_id <HF_USER> --seed 42 --num_responses 2
-
-# Score all responses (positiveness + normalized length)
-python src/imdb/dataset/score_responses.py \
-    --user_id <HF_USER> --seed 42 --num_responses 2
-
-# Create chosen/rejected preference pairs per group
-python src/imdb/dataset/create_chosen_rejected.py \
-    --user_id <HF_USER> --seed 42 --proportion 0.2 --alpha 0.5
+export USER_ID="your-hf-username"
+export SEED=42
+export PROPORTION=0.2
+export CUDA_VISIBLE_DEVICES=0
 ```
 
-### Step 2: Reward Model Training
+## Run the experiments
+
+Run commands from the repository root. Start with one preference setting; the examples below use \(\alpha = 1.0\).
+
+### 1. Build preference datasets
+
+Generate candidate responses, score sentiment and length, and construct group-labeled chosen/rejected pairs:
 
 ```bash
-# Train all reward models (vanilla + maxmin minority + maxmin majority)
-bash scripts/train_all_reward_models.sh
-
-# Or train individually:
-# Vanilla
-python src/imdb/reward_training/vanilla_reward_training.py \
-    --user_id <HF_USER> --seed 42 --proportion 0.2 --alpha 0.5
-
-# MaxMin (train one model per group)
-python src/imdb/reward_training/maxmin_reward_training.py \
-    --user_id <HF_USER> --seed 42 --proportion 0.2 --alpha 0.5 --group 0  # minority
-python src/imdb/reward_training/maxmin_reward_training.py \
-    --user_id <HF_USER> --seed 42 --proportion 0.2 --alpha 0.5 --group 1  # majority
-
-# SharedRep
-python src/imdb/reward_training/sharedrep_reward_training.py \
-    --user_id <HF_USER> --seed 42 --proportion 0.2 --alpha 0.5 --k 64
+ALPHA=1.0 MAX_NEW_TOKENS=512 bash scripts/build_dataset.sh
 ```
 
-### Step 3: PPO Policy Training
-
-All methods use the unified training script:
+To prepare an alpha sweep, use `ALPHA_RANGE`. Once the raw responses have been generated and scored, reuse them with `SKIP_GENERATE=1 SKIP_SCORE=1`:
 
 ```bash
-# Train all PPO policies
-bash scripts/train_all_ppo_policy.sh
-
-# Or train individually:
-python src/imdb/ppo_training/unified_ppo_training.py \
-    --method <gold|maxmin|sharedrep|vanilla> \
-    --user_id <HF_USER> --seed 42 --proportion 0.2 --alpha 0.5
-    # Add --k 64 for sharedrep
+SKIP_GENERATE=1 SKIP_SCORE=1 \
+ALPHA_RANGE="0.5 0.6 0.7 0.75 0.8 0.9 1.0 1.1 1.2 1.3" \
+MAX_NEW_TOKENS=512 bash scripts/build_dataset.sh
 ```
 
-### Step 4: Evaluation
+### 2. Train and evaluate
+
+The pipeline trains the pooled and two group-specific reward models, trains the selected PPO policies, then generates and scores evaluation responses:
 
 ```bash
-# Evaluate all trained policies
-bash scripts/evaluate_ppo_policies.sh
-
-# Or evaluate individually:
-# Generate responses from trained policy
-python src/imdb/evaluation/generate_responses.py \
-    --user_id <HF_USER> --seed 42 --method maxmin --proportion 0.2 --alpha 0.5
-
-# Score the generated responses
-python src/imdb/evaluation/score_responses.py \
-    --user_id <HF_USER> --seed 42 --method maxmin --proportion 0.2 --alpha 0.5
-
-# Display evaluation metrics
-python src/imdb/evaluation/read_evaluation_scores.py \
-    --user_id <HF_USER> --seed 42 --method maxmin --proportion 0.2 --alpha 0.5
+ALPHAS="1.0" \
+METHODS="vanilla maxmin sumgrad pcgrad mgda" \
+POLICY_MODEL_NAMES="gpt2" \
+KL_DIV=mean_kl KL_COEF=0.1 \
+MAX_NEW_TOKENS=512 EVAL_MAX_NEW_TOKENS=256 \
+NO_REWARD_NORM=1 \
+bash scripts/run_train_eval_pipeline.sh
 ```
 
-## Key Parameters
+Set `ALPHAS` to the desired space-separated sweep after preparing its preference datasets. Use `SKIP_REWARD_TRAINING=1` to reuse reward models or `SKIP_PPO_TRAINING=1` to reuse trained policies.
 
-| Parameter | Flag | Description | Default |
-|-----------|------|-------------|---------|
-| Method | `--method` | Training method: `gold`, `maxmin`, `sharedrep`, `vanilla` | Required |
-| User ID | `--user_id` | HuggingFace username for model/dataset hub IDs | Required |
-| Seed | `--seed` | Random seed for reproducibility | Required |
-| Proportion | `--proportion` | Fraction of minority group (e.g., 0.2 = 20% minority) | Required for maxmin/sharedrep/vanilla |
-| Alpha | `--alpha` | Group preference strength (0.5 = identical, 1.0 = maximally different) | 1.0 |
-| K | `--k` | SharedRep inner hidden dimension | Required for sharedrep |
+The stages are also available separately:
 
-## HuggingFace Hub Naming Convention
+```bash
+# Train pooled, minority, and majority reward models.
+ALPHAS="1.0" SKIP_NORM=1 bash scripts/train_reward_models.sh
 
-All models and datasets are pushed to the HF Hub with systematic naming:
+# Train PPO policies for one alpha. This script uses singular ALPHA.
+ALPHA=1.0 METHODS="vanilla maxmin sumgrad pcgrad mgda" \
+NO_REWARD_NORM=1 bash scripts/train_ppo_policy.sh
 
-### Reward Models
+# Evaluate a specific trained policy; supply its full Hub ID.
+POLICIES="${USER_ID}/pcgrad-imdb-ppo-prop0.2-alpha1.0-seed${SEED}-mean_kl0.1-gpt2" \
+bash scripts/evaluate_ppo_policy.sh
+```
 
-| Method | Hub ID |
-|--------|--------|
-| Vanilla | `<user>/vanilla-imdb-reward-ALPHA<A>-len<L>-gpt2` |
-| MaxMin (minority) | `<user>/maxmin-imdb-reward-ALPHA<A>-len<L>-minority-gpt2` |
-| MaxMin (majority) | `<user>/maxmin-imdb-reward-ALPHA<A>-len<L>-majority-gpt2` |
-| SharedRep | `<user>/sharedrep-imdb-reward-prop<P>-alpha<A>-seed<S>-k<K>` |
+The standalone evaluation script has author-specific default policy IDs, so set `POLICIES` explicitly when evaluating your own runs. `NO_REWARD_NORM=1` disables reward-model calibration; it does not disable PPO reward whitening.
 
-### PPO Policies
+### Main settings
 
-| Method | Hub ID |
-|--------|--------|
-| Gold | `<user>/gold-imdb-ppo-alpha<A>-seed<S>` |
-| Vanilla | `<user>/vanilla-imdb-ppo-prop<P>-alpha<A>-seed<S>` |
-| MaxMin | `<user>/maxmin-imdb-ppo-prop<P>-alpha<A>-seed<S>` |
-| SharedRep | `<user>/sharedrep-imdb-ppo-prop<P>-alpha<A>-seed<S>-k<K>` |
+| Setting | Manuscript / main workflow |
+|---|---|
+| Minority proportion | 0.2 |
+| Main policy backbone | GPT-2 |
+| PPO episodes | 50,000 |
+| PPO epochs per batch | 3 |
+| Effective batch size | 64 |
+| Learning rate | `3e-6`, cosine schedule |
+| KL | Mean per-token KL, coefficient 0.1 |
+| Precision | bf16 |
+| PPO reward whitening | Enabled |
+| Maximum new tokens | 512 during training, 256 during evaluation |
 
-### Evaluation Datasets
+The scripts expose `LEARNING_RATE`, `TOTAL_EPISODES`, `KL_DIV`, `KL_COEF`, and other overrides. Each script launches Python directly. For additional backbones, configure the reward and policy models consistently using `REWARD_MODEL_BASE`, `POLICY_MODEL_NAMES`, and the matching `RM_SUFFIX` in the individual training scripts.
 
-| Method | Hub ID |
-|--------|--------|
-| Gold | `<user>/gold-imdb-ppo-eval-alpha<A>-seed<S>` |
-| Vanilla | `<user>/vanilla-imdb-ppo-eval-prop<P>-alpha<A>-seed<S>` |
-| MaxMin | `<user>/maxmin-imdb-ppo-eval-prop<P>-alpha<A>-seed<S>` |
-| SharedRep | `<user>/sharedrep-imdb-ppo-eval-prop<P>-alpha<A>-seed<S>-k<K>` |
+### 3. Analyze results and gradients
 
-## WandB Metrics (PPO Training)
+Open [the alpha analysis notebook](notebooks/analyze_ppo_by_alpha.ipynb) to compare group rewards, population utility, reward correlations, and MaxMin training trajectories:
 
-During PPO training, the following metrics are logged to Weights & Biases:
+```bash
+mkdir -p images/with_sumgrad
+jupyter lab notebooks/analyze_ppo_by_alpha.ipynb
+```
 
-### Objective Metrics
+Update the notebook's `USER_ID`, evaluation dataset IDs, seeds, and W&B run IDs to match your experiments. Its existing configuration combines historical runs with different seeds and naming conventions; it is not automatically connected to newly trained policies. Run it with `notebooks/` as the working directory for its relative figure-output paths.
 
-| Metric | Meaning |
-|--------|---------|
-| `objective/scores` | Mean reward from the reward model. Primary signal -- should increase over training. |
-| `objective/kl` | KL divergence from the reference policy. Measures policy drift. |
-| `objective/entropy` | Policy entropy (token-level). Higher = more diverse generation. |
-| `objective/non_score_reward` | KL penalty reward (`-kl_coef * KL`). Implicit reward for staying close to reference. |
-| `objective/rlhf_reward` | Total RLHF reward = `non_score_reward + scores`. |
+For group-gradient cosine traces during PCGrad, SumGrad, or MGDA training:
 
-### Policy & Loss Metrics
+```bash
+ALPHA=1.0 METHODS="pcgrad sumgrad mgda" RECORD_COSINE=1 \
+bash scripts/train_ppo_policy.sh
+```
 
-| Metric | Meaning |
-|--------|---------|
-| `loss/policy_avg` | Clipped PPO policy loss, averaged over epochs/minibatches. |
-| `loss/value_avg` | Clipped value function loss. |
-| `policy/approxkl_avg` | Approximate KL of the policy update. Monitors update magnitude. |
-| `policy/clipfrac_avg` | Fraction of samples where PPO clip threshold was active. |
-| `policy/entropy_avg` | Mean entropy of policy logits during optimization. |
+These traces are written under `diagnostics/`. Additional diagnostic tools cover vanilla/group gradient alignment, reward-scale comparisons, and reward calibration in [src/imdb/diagnostics](src/imdb/diagnostics).
 
-### Value Function Metrics
 
-| Metric | Meaning |
-|--------|---------|
-| `val/clipfrac_avg` | Fraction of samples where value function clip was active. |
-| `val/ratio` | Mean importance sampling ratio (should stay near 1.0). |
-| `val/ratio_var` | Variance of importance sampling ratio. High = unstable updates. |
-| `val/num_eos_tokens` | Count of generated responses containing an EOS token. |
+## Repository layout
 
-### Group Selection Metrics (maxmin, sharedrep, gold only)
+```text
+scripts/
+  build_dataset.sh                 Generate, score, and construct preferences
+  train_reward_models.sh           Train pooled and group-specific reward models
+  train_ppo_policy.sh              Train PPO policies
+  evaluate_ppo_policy.sh           Generate and score evaluation responses
+  run_train_eval_pipeline.sh       Run reward training, PPO, and evaluation
+src/
+  helper/                         Shared data, model, and scoring utilities
+  imdb/dataset/                   Preference dataset construction
+  imdb/reward_training/           Reward training and normalization
+  imdb/ppo_training/              PPO and gradient-combination methods
+  imdb/evaluation/                Response generation and evaluation
+  imdb/diagnostics/               Gradient and reward-scale diagnostics
+notebooks/
+  analyze_ppo_by_alpha.ipynb       Main alpha-sweep analysis and figures
+  inspect_vanilla_conciseness.ipynb Response-length inspection
+```
 
-| Metric | Meaning |
-|--------|---------|
-| `group_selection/worst_group_idx` | Index of the worst-off group selected for the PPO update. |
-| `group_selection/worst_group_name` | Name of the selected group (`minority`/`majority` or `head_0`/`head_1`/...). |
-| `group_selection/mean_reward_<name>` | Mean reward per group across the batch (one entry per group). |
+## Acknowledgments
 
-**What to watch:**
-
-- `objective/scores` trending up = policy is learning
-- `objective/kl` staying bounded = policy hasn't collapsed
-- `group_selection/worst_group_idx` alternating between groups = MaxMin objective is balancing both groups
-- `mean_reward_minority` and `mean_reward_majority` converging = fairness gap is closing
-
-### Training State
-
-| Metric | Meaning |
-|--------|---------|
-| `eps` | Episodes processed per second (throughput). |
-| `lr` | Current learning rate. |
-| `episode` | Total episodes processed. |
-
-## Architecture Details
-
-### Base Models
-
-- **Policy model**: `lvwerra/gpt2-imdb` (GPT-2 fine-tuned on IMDb)
-- **Value model**: `lvwerra/gpt2-imdb` with `num_labels=1` (regression head)
-- **Gold reward model**: `lvwerra/distilbert-imdb` (DistilBERT sentiment classifier)
-- **Learned reward models**: Raw GPT-2 backbone (`gpt2`) with frozen weights, trainable linear head(s)
-
-### SharedRep Model (`SharedRepGPT2RM`)
-
-A custom GPT-2-based reward model with:
-- Shared GPT-2 backbone (frozen during reward training)
-- `n_heads` group-specific reward heads, each: `hidden_dim -> k -> 1`
-- In `maxmin` mode, returns all head scores `(batch, n_heads)` for batch-level group selection
-
-### MaxMin Reward Wrapper (`MaxMinRewardWrapper`)
-
-Wraps a GPT-2 backbone with two separate linear heads (minority and majority). Returns stacked rewards `(batch, 2)` for batch-level group selection during PPO.
-
-### Reward Function Override
-
-The TRL `PPOTrainer` uses a `get_reward` function to compute rewards. For custom methods, this function is monkey-patched at `trl.experimental.ppo.ppo_trainer.get_reward` to implement method-specific reward logic while preserving the original function for value model computation.
+This repository builds on [sharedrep-rlhf](https://github.com/marcellobullo/sharedrep-rlhf) and the [MaxMinRLHF implementation](https://github.com/CharlesQ9/MaxMinRLHF). PPO training uses TRL. The gradient-coordination comparisons use PCGrad (Yu et al., 2020) and MGDA (Sener and Koltun, 2018).
