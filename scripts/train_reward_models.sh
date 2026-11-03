@@ -1,5 +1,5 @@
 #!/bin/bash
-# Train all reward models: Vanilla (baseline), MaxMin (both groups), and SharedRep
+# Train all reward models: Vanilla (baseline) and MaxMin (both groups)
 # For multiple alpha values
 #
 # Logging: two log files (like build_dataset.sh):
@@ -70,7 +70,6 @@ SEED="${SEED:-42}"
 PROPORTION="${PROPORTION:-0.2}"
 NUM_RESPONSES="${NUM_RESPONSES:-2}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
-K="${K:-64}"  # SharedRep hidden dimension
 # Use venv Python if available, otherwise use system python3
 PYTHON="${PYTHON:-$(which python3)}"
 if [ -f "venv/bin/python3" ]; then
@@ -134,7 +133,6 @@ echo "NUM_RESPONSES:   $NUM_RESPONSES"
 echo "MAX_NEW_TOKENS:  $MAX_NEW_TOKENS"
 echo "Alphas:          $ALPHAS"
 echo "Reward model:    $REWARD_MODEL_BASE"
-echo "K (SharedRep):   $K"
 echo "Python:          $PYTHON"
 echo "SKIP_TRAIN:      ${SKIP_TRAIN:-0}"
 echo "SKIP_NORM:       ${SKIP_NORM:-0}"
@@ -146,12 +144,12 @@ echo ""
 # Convert alphas to array for counting
 ALPHAS_ARRAY=($ALPHAS)
 TOTAL_ALPHAS=${#ALPHAS_ARRAY[@]}
-# Training methods: vanilla, maxmin-minority, maxmin-majority (skip sharedrep for now)
+# Training methods: vanilla, maxmin-minority, maxmin-majority
 TOTAL_METHODS=3
 TOTAL_MODELS=$((TOTAL_ALPHAS * TOTAL_METHODS))
 
 echo "📊 Training $TOTAL_MODELS models:"
-echo "  - Methods: Vanilla, MaxMin-Minority, MaxMin-Majority (SharedRep skipped)"
+echo "  - Methods: Vanilla, MaxMin-Minority, MaxMin-Majority"
 echo "  - Alphas: $ALPHAS"
 echo "  - Order: Iterate through methods first, then alphas for each method"
 echo ""

@@ -452,7 +452,7 @@ def _patch_ppo_for_vanilla_deconflict(apply_mean_kl: bool = True) -> None:
     exec(compile(source, "<patched_ppo_train_deconflict>", "exec"), gd)
     _experimental_ppo_module.PPOTrainer.train = gd["train"]
 
-# Shared state for tracking which group is selected as worst during MaxMin/SharedRep PPO.
+# Shared state for tracking which group is selected as worst during MaxMin PPO.
 # Written by custom get_reward functions, read by GroupSelectionCallback.
 _group_selection_info = {
     "worst_group_idx": None,     # int: index of the worst group (0=minority, 1=majority for maxmin)
@@ -1277,7 +1277,6 @@ class GroupSelectionCallback(TrainerCallback):
                 logs[f"group_selection/mean_reward_raw_{name}"] = mean_val
 
 
-
 class GradientCosineDiagnosticCallback(TrainerCallback):
     """
     Calls the offline gradient-cosine diagnostic on the live in-memory vanilla
@@ -1429,7 +1428,6 @@ def first_true_indices(mask: torch.Tensor) -> torch.Tensor:
     # Find minimum index (first True), or sequence_length if all False
     result = indices_tensor.min(dim=-1)[0]
     return result
-from src.models.sr_gpt2.sr_gpt2_modeling import SharedRepGPT2RM
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification
 from src.helper.imdb_utils import pre_processing_imdb
 from src.helper.model_utils import (
@@ -1483,112 +1481,6 @@ class MaxMinRewardWrapper(nn.Module):
             hidden_states=output.hidden_states,
             attentions=None,
         )
-
-
-def get_sharedrep_reward(model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Computes the reward using batch-level MaxMin group selection for SharedRep models.
-    
-    Per Algorithm 1 of SharedRep-RLHF / MaxMin-RLHF, this function:
-    1. Computes per-sample rewards for ALL heads (groups)
-    2. Computes the mean reward per head across the batch
-    3. Selects the worst-off head (lowest mean reward)
-    4. Returns that head's per-sample rewards for PPO update
-
-    Args:
-        model (`torch.nn.Module`):
-            The SharedRepGPT2RM model in maxmin mode (or value model for fallback).
-        query_responses (`torch.Tensor`):
-            The tensor containing the query responses.
-        pad_token_id (`int`):
-            The token ID representing the pad token.
-        context_length (`int`):
-            The length of the context in the query responses.
-
-    Returns:
-        tuple:
-            - `reward_logits` (`torch.Tensor`):
-                The logits for all heads, shape (batch, n_heads).
-            - `final_rewards` (`torch.Tensor`):
-                The per-sample rewards from the worst-off head, shape (batch,).
-            - `sequence_lengths` (`torch.Tensor`):
-                The lengths of the sequences in the query responses.
-    """
-    if isinstance(model, SharedRepGPT2RM):
-        assert model.maxmin, "The model must be in maxmin mode"
-
-        attention_mask = query_responses != pad_token_id
-        position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
-        # IMPORTANT: keep original token ids (including pad_token_id) because
-        # SharedRepGPT2RM.forward() computes last_non_pad_token from input_ids.
-        # Zero-filling pads here would make pad detection fail and would shift
-        # reward extraction to padded positions.
-        input_ids = query_responses
-
-        # Compute rewards for ALL heads (groups)
-        with torch.no_grad():
-            rewards = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                use_cache=False,  # avoid allocating KV caches (~1.4 GB) since we don't need them
-            )
-    
-        sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
-        
-        # rewards.logits shape: (batch, n_heads)
-        all_head_rewards = rewards.logits  # (batch, n_heads)
-
-        # Batch-level group selection (Algorithm 1): pick the head with lowest mean reward
-        head_means_raw = all_head_rewards.mean(dim=0)
-        head_means = all_head_rewards.mean(dim=0)  # (n_heads,)
-        worst_head_idx = head_means.argmin().item()
-        selected_rewards = all_head_rewards[:, worst_head_idx]
-        
-        # Record group selection stats for logging
-        n_heads = all_head_rewards.shape[1]
-        _group_selection_info["worst_group_idx"] = worst_head_idx
-        _group_selection_info["group_means"] = [head_means[i].item() for i in range(n_heads)]
-        _group_selection_info["group_means_raw"] = [head_means_raw[i].item() for i in range(n_heads)]
-        _group_selection_info["group_names"] = [f"head_{i}" for i in range(n_heads)]
-        
-        return (
-            rewards.logits,
-            selected_rewards,
-            sequence_lengths,
-        )
-    else:
-        # Value model or other model: use the ORIGINAL get_reward (not the overridden one)
-        return _original_get_reward(model, query_responses, pad_token_id, context_length)
-
-
-def prepare_get_sharedrep_reward(policy_tokenizer, reward_tokenizer, max_length: int = 512):
-    """
-    Returns a get_reward-compatible function that re-tokenizes query_responses when
-    policy and reward tokenizers differ.
-    """
-    need_alignment = len(policy_tokenizer) != len(reward_tokenizer)
-
-    def get_sharedrep_reward_aligned(
-        model: torch.nn.Module,
-        query_responses: torch.Tensor,
-        pad_token_id: int,
-        context_length: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if isinstance(model, SharedRepGPT2RM) and need_alignment:
-            qr, rpad, ctx = _align_query_responses_to_reward_tokenizer(
-                policy_tokenizer,
-                reward_tokenizer,
-                query_responses,
-                pad_token_id,
-                context_length,
-                query_responses.device,
-                max_length=max_length,
-            )
-            return get_sharedrep_reward(model, qr, rpad, ctx)
-        return get_sharedrep_reward(model, query_responses, pad_token_id, context_length)
-
-    return get_sharedrep_reward_aligned
 
 
 def _align_query_responses_to_reward_tokenizer(
@@ -1934,212 +1826,6 @@ def prepare_get_maxmin_reward(policy_tokenizer, reward_tokenizer, max_length: in
     return get_maxmin_reward_aligned
 
 
-def prepare_get_gold_reward(policy_tokenizer, reward_tokenizer, alpha, max_length=512, norm_divisor=250):
-    """
-    Prepares a closure that computes gold reward based on positiveness and conciseness.
-
-    Uses the same group preference formulas as create_chosen_rejected.py:
-    - Minority: (1-normalized_length)*alpha + (1-alpha)*positiveness (prefers brevity)
-    - Majority: (1-normalized_length)*(1-alpha) + alpha*positiveness (prefers positivity)
-
-    Args:
-        policy_tokenizer: Tokenizer for the policy model
-        reward_tokenizer: Tokenizer for the reward model (sentiment model)
-        alpha: Weight parameter controlling group preference strength (0.5-1.0)
-        max_length: Maximum length for reward tokenization (default: 512)
-        norm_divisor: Divisor for normalizing token length to [0,1] (default: 500)
-
-    Returns:
-        A function that computes gold rewards using MaxMin across groups
-    """
-    def compute_gold_reward(model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Computes the reward logits and the rewards for a given model and query responses.
-
-        Args:
-            model (`torch.nn.Module`):
-                The model used to compute the reward logits.
-            query_responses (`torch.Tensor`):
-                The tensor containing the query responses.
-            pad_token_id (`int`):
-                The token ID representing the pad token.
-            context_length (`int`):
-                The length of the context in the query responses.
-
-        Returns:
-            tuple:
-                - `reward_logits` (`torch.Tensor`):
-                    The logits for the reward model.
-                - `final_rewards` (`torch.Tensor`):
-                    The final rewards for each query response.
-                - `sequence_lengths` (`torch.Tensor`):
-                    The lengths of the sequences in the query responses.
-        """
-
-        # Differentiate gold reward model from value model by num_labels
-        # Value model has 1 label (regression), reward model has 2 labels (classification)
-        if model.config.num_labels == 1:
-            # This is the value model, use the ORIGINAL get_reward (not the overridden one)
-            return _original_get_reward(model, query_responses, pad_token_id, context_length)
-        else:
-            # This is the gold reward model (sentiment classifier)
-            pos_id = model.config.label2id["POSITIVE"]
-
-            # Decode to text
-            list_query_responses_text = policy_tokenizer.batch_decode(
-                query_responses,
-                skip_special_tokens=True
-            )
-
-            # Re-encode with reward tokenizer (sentiment model tokenizer)
-            query_responses_tokens_reward = reward_tokenizer(
-                list_query_responses_text,
-                padding=True,
-                truncation=True,
-                return_tensors="pt",
-                max_length=max_length,
-            ).to(query_responses.device)
-
-            reward_input_ids = query_responses_tokens_reward["input_ids"]
-            reward_attention_mask = query_responses_tokens_reward["attention_mask"]
-
-            # Compute positiveness scores
-            with torch.no_grad():
-                outputs = model(
-                    input_ids=reward_input_ids,
-                    attention_mask=reward_attention_mask,
-                )
-            probs = torch.softmax(outputs.logits, dim=-1)
-            positiveness = probs[:, pos_id]
-
-            # Compute normalized length (same as in create_chosen_rejected.py)
-            # Token lengths
-            sequence_lengths = first_true_indices(reward_input_ids == model.config.pad_token_id)
-            # Normalized length [0, 1] using norm_divisor (matches scoring pipeline)
-            normalized_length = torch.clamp(sequence_lengths.float() / norm_divisor, min=0.0, max=1.0)
-
-            # Compute group scores using the SAME formulas as create_chosen_rejected.py
-            # Minority group: prefers brevity (conciseness)
-            # score = (1-normalized_length)*alpha + (1-alpha)*positiveness
-            group_score_minority = (1 - normalized_length) * alpha + (1 - alpha) * positiveness
-            
-            # Majority group: prefers positivity
-            # score = (1-normalized_length)*(1-alpha) + alpha*positiveness
-            group_score_majority = (1 - normalized_length) * (1 - alpha) + alpha * positiveness
-
-            # Batch-level group selection (Algorithm 1 of MaxMin-RLHF):
-            # Pick the group with lower mean reward across the batch, then use
-            # that group's per-sample rewards for the PPO update.
-            min_mean = group_score_minority.mean().item()
-            maj_mean = group_score_majority.mean().item()
-            if min_mean <= maj_mean:
-                selected_rewards = group_score_minority
-                worst_idx = 0
-            else:
-                selected_rewards = group_score_majority
-                worst_idx = 1
-            
-            # Record group selection stats for logging
-            _group_selection_info["worst_group_idx"] = worst_idx
-            _group_selection_info["group_means"] = [min_mean, maj_mean]
-            _group_selection_info["group_names"] = ["minority", "majority"]
-            
-            return (
-                selected_rewards,
-                selected_rewards,
-                sequence_lengths,
-            )
-    return compute_gold_reward
-
-
-def prepare_get_gold_vanilla_reward(policy_tokenizer, reward_tokenizer, alpha, proportion, max_length=512, norm_divisor=250):
-    """
-    Prepares a closure that computes oracle rewards with per-sample group
-    assignment for single-reward (vanilla) PPO — no MaxMin group selection.
-
-    Each sample is randomly assigned to minority (prob=proportion) or majority
-    (prob=1-proportion), then scored with that group's oracle formula.  All
-    per-sample rewards are fed into a standard PPO update as a flat batch.
-
-    This is an ablation baseline that isolates the effect of MaxMin vs vanilla
-    PPO when both use the exact same oracle per-sample rewards.
-
-    Args:
-        policy_tokenizer: Tokenizer for the policy model
-        reward_tokenizer: Tokenizer for the reward model (sentiment model)
-        alpha: Weight parameter controlling group preference strength (0.5-1.0)
-        proportion: Probability that a sample belongs to the minority group
-        max_length: Maximum length for reward tokenization (default: 512)
-        norm_divisor: Divisor for normalizing token length to [0,1] (default: 500)
-
-    Returns:
-        A function compatible with trl's ``get_reward`` signature.
-    """
-    def compute_gold_vanilla_reward(
-        model: torch.nn.Module,
-        query_responses: torch.Tensor,
-        pad_token_id: int,
-        context_length: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Value model (num_labels == 1) → fall back to original get_reward
-        if model.config.num_labels == 1:
-            return _original_get_reward(model, query_responses, pad_token_id, context_length)
-
-        # ---- Oracle reward computation (identical to gold) ----
-        pos_id = model.config.label2id["POSITIVE"]
-
-        list_query_responses_text = policy_tokenizer.batch_decode(
-            query_responses, skip_special_tokens=True
-        )
-
-        query_responses_tokens_reward = reward_tokenizer(
-            list_query_responses_text,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
-            max_length=max_length,
-        ).to(query_responses.device)
-
-        reward_input_ids = query_responses_tokens_reward["input_ids"]
-        reward_attention_mask = query_responses_tokens_reward["attention_mask"]
-
-        with torch.no_grad():
-            outputs = model(
-                input_ids=reward_input_ids,
-                attention_mask=reward_attention_mask,
-            )
-        probs = torch.softmax(outputs.logits, dim=-1)
-        positiveness = probs[:, pos_id]
-
-        sequence_lengths = first_true_indices(reward_input_ids == model.config.pad_token_id)
-        normalized_length = torch.clamp(sequence_lengths.float() / norm_divisor, min=0.0, max=1.0)
-
-        group_score_minority = (1 - normalized_length) * alpha + (1 - alpha) * positiveness
-        group_score_majority = (1 - normalized_length) * (1 - alpha) + alpha * positiveness
-
-        # ---- Vanilla: per-sample group assignment, no MaxMin ----
-        # Randomly assign each sample to a group (same distribution as
-        # create_chosen_rejected.py).  Each sample gets its own group's
-        # oracle score; all rewards are treated equally by PPO.
-        batch_size = query_responses.size(0)
-        # 1 = majority (prob 1-proportion), 0 = minority (prob proportion)
-        group_ids = torch.bernoulli(
-            torch.full((batch_size,), 1 - proportion, device=query_responses.device)
-        ).long()
-
-        selected_rewards = torch.where(
-            group_ids == 0, group_score_minority, group_score_majority
-        )
-
-        return (
-            selected_rewards,
-            selected_rewards,
-            sequence_lengths,
-        )
-
-    return compute_gold_vanilla_reward
-
-
 def tokenize(examples, tokenizer):
     return tokenizer(
         examples["query"],
@@ -2154,15 +1840,13 @@ def tokenize(examples, tokenizer):
 def parse_args():
     parser = argparse.ArgumentParser(description="Unified PPO Training with configurable policy optimization method.")
     parser.add_argument("--method", type=str, required=True,
-                        choices=["sharedrep", "maxmin", "gold", "gold_vanilla", "vanilla", "pcgrad", "sumgrad", "mgda"],
-                        help="Policy optimization method: 'sharedrep', 'maxmin', 'gold', 'gold_vanilla', 'vanilla', "
+                        choices=["vanilla", "maxmin", "pcgrad", "sumgrad", "mgda"],
+                        help="Policy optimization method: 'vanilla', 'maxmin', "
                              "'pcgrad', 'sumgrad', or 'mgda' (MGDA min-norm multi-objective, arXiv:1810.04650)")
     parser.add_argument("--user_id", type=str, required=True, help="Hugging Face user ID.")
     parser.add_argument("--seed", type=int, required=True, help="Random seed to use.")
     parser.add_argument("--proportion", type=float, default=None,
-                        help="Proportion of minority group (required for sharedrep, maxmin, gold_vanilla, and vanilla methods).")
-    parser.add_argument("--k", type=int, default=None,
-                        help="Inner hidden dimension size (required for sharedrep method).")
+                        help="Proportion of minority group (required for all methods).")
     parser.add_argument("--alpha", type=float, default=1.0,
                         help="Alpha value for the scores (controls group preference strength, default: 1.0). Used in all methods.")
     parser.add_argument(
@@ -2191,8 +1875,6 @@ def parse_args():
                         help="Override MaxMin minority reward model hub ID.")
     parser.add_argument("--maxmin_majority_rm_hub_id", type=str, default=None,
                         help="Override MaxMin majority reward model hub ID.")
-    parser.add_argument("--sharedrep_rm_hub_id", type=str, default=None,
-                        help="Override SharedRep reward model hub ID.")
     parser.add_argument("--policy_model_name", type=str, default="gpt2",
                         help="Base model for policy/ref (default: gpt2). Use 'lvwerra/gpt2-imdb' for the "
                              "IMDB-pretrained GPT-2, 'EleutherAI/pythia-160m' for the GPT-2-scale Pythia backbone, "
@@ -2363,8 +2045,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_new_tokens=512,
-                      vanilla_rm_hub_id=None, maxmin_minority_rm_hub_id=None, maxmin_majority_rm_hub_id=None, sharedrep_rm_hub_id=None,
+def load_reward_model(method, user_id, seed, proportion, alpha, device, max_new_tokens=512,
+                      vanilla_rm_hub_id=None, maxmin_minority_rm_hub_id=None, maxmin_majority_rm_hub_id=None,
                       rm_load_kwargs=None):
     """Load and configure the reward model based on the selected method.
     Returns (reward_model, reward_tokenizer, hub_id_or_ids).
@@ -2374,24 +2056,7 @@ def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_n
     applied to the (frozen) reward backbone so a 4B RM can be loaded in bf16 or NF4 4-bit.
     """
     rm_load_kwargs = dict(rm_load_kwargs or {})
-    if method == "sharedrep":
-        if proportion is None or k is None:
-            raise ValueError("--proportion and --k are required for sharedrep method")
-        
-        reward_model_name = sharedrep_rm_hub_id or f"{user_id}/sharedrep-imdb-reward-prop{proportion}-alpha{alpha}-seed{seed}-k{k}"
-        reward_model = SharedRepGPT2RM.from_pretrained(reward_model_name)
-        reward_model.enable_maxmin()
-        reward_model.eval()
-        # Move to device for consistency (though Accelerator handles this, explicit is clearer)
-        reward_model.to(device)
-        
-        reward_tokenizer = AutoTokenizer.from_pretrained(reward_model_name, padding_side="left")
-        reward_tokenizer.pad_token = reward_tokenizer.eos_token
-        reward_model.config.pad_token_id = reward_tokenizer.pad_token_id
-        
-        return reward_model, reward_tokenizer, None
-    
-    elif method in ("maxmin", "pcgrad", "sumgrad", "mgda"):
+    if method in ("maxmin", "pcgrad", "sumgrad", "mgda"):
         if proportion is None:
             raise ValueError(f"--proportion is required for {method} method")
         
@@ -2424,20 +2089,6 @@ def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_n
         hub_ids = {"minority": reward_model_name_minority, "majority": reward_model_name_majority}
         return maxmin_reward_model, reward_tokenizer, hub_ids
     
-    elif method in ("gold", "gold_vanilla"):
-        if method == "gold_vanilla" and proportion is None:
-            raise ValueError("--proportion is required for gold_vanilla method")
-        
-        reward_model_name = "lvwerra/distilbert-imdb"
-        reward_model = AutoModelForSequenceClassification.from_pretrained(reward_model_name)
-        reward_model.eval()
-        reward_model.to(device)
-        
-        reward_tokenizer = AutoTokenizer.from_pretrained(reward_model_name)
-        reward_model.config.pad_token_id = reward_tokenizer.pad_token_id
-        
-        return reward_model, reward_tokenizer, None
-    
     elif method == "vanilla":
         if proportion is None:
             raise ValueError("--proportion is required for vanilla method")
@@ -2457,18 +2108,10 @@ def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_n
         raise ValueError(f"Unknown method: {method}")
 
 
-def get_policy_hub_id(method, user_id, seed, proportion, k, alpha):
+def get_policy_hub_id(method, user_id, seed, proportion, alpha):
     """Generate the policy hub ID based on the selected method."""
-    if method == "sharedrep":
-        return f"{user_id}/sharedrep-imdb-ppo-prop{proportion}-alpha{alpha}-seed{seed}-k{k}"
-    elif method == "maxmin":
+    if method == "maxmin":
         return f"{user_id}/maxmin-imdb-ppo-prop{proportion}-alpha{alpha}-seed{seed}"
-    elif method == "gold":
-        # Gold uses alpha to define group preferences in the MaxMin objective
-        return f"{user_id}/gold-imdb-ppo-alpha{alpha}-seed{seed}"
-    elif method == "gold_vanilla":
-        # Gold vanilla: oracle per-sample group scores + single-reward PPO (no MaxMin)
-        return f"{user_id}/gold-vanilla-imdb-ppo-prop{proportion}-alpha{alpha}-seed{seed}"
     elif method == "vanilla":
         return f"{user_id}/vanilla-imdb-ppo-prop{proportion}-alpha{alpha}-seed{seed}"
     elif method == "pcgrad":
@@ -2481,17 +2124,15 @@ def get_policy_hub_id(method, user_id, seed, proportion, k, alpha):
         raise ValueError(f"Unknown method: {method}")
 
 
-def setup_reward_function(method, policy_tokenizer, reward_tokenizer, reward_model, alpha, proportion=None,
+def setup_reward_function(method, policy_tokenizer, reward_tokenizer, reward_model,
                           deconflict_minority_model=None, deconflict_minority_tok=None):
     """Set up the reward function based on the selected method.
 
     Args:
-        method: Training method ('sharedrep', 'maxmin', 'gold', 'gold_vanilla', 'vanilla')
+        method: Training method ('vanilla', 'maxmin', 'pcgrad', 'sumgrad', 'mgda')
         policy_tokenizer: Tokenizer for the policy model
         reward_tokenizer: Tokenizer for the reward model
         reward_model: The reward model instance
-        alpha: Alpha parameter for gold reward computation
-        proportion: Minority group proportion (required for gold_vanilla)
         deconflict_minority_model / deconflict_minority_tok: when set (vanilla method,
             --vanilla_deconflict), the minority group RM used as the guard for the W4
             deconfliction intervention. The scalar reward stays the pooled vanilla RM.
@@ -2502,16 +2143,8 @@ def setup_reward_function(method, policy_tokenizer, reward_tokenizer, reward_mod
     # Both must be set to ensure the override takes effect.
 
     max_length = 512
-    if method == "sharedrep":
-        custom_fn = prepare_get_sharedrep_reward(policy_tokenizer, reward_tokenizer, max_length=max_length)
-    elif method == "maxmin":
+    if method == "maxmin":
         custom_fn = prepare_get_maxmin_reward(policy_tokenizer, reward_tokenizer, max_length=max_length)
-    elif method == "gold":
-        # Pass alpha to gold reward function for consistent group preference computation
-        custom_fn = prepare_get_gold_reward(policy_tokenizer, reward_tokenizer, alpha, max_length=max_length, norm_divisor=250)
-    elif method == "gold_vanilla":
-        # Oracle per-sample group scoring, no MaxMin
-        custom_fn = prepare_get_gold_vanilla_reward(policy_tokenizer, reward_tokenizer, alpha, proportion, max_length=max_length, norm_divisor=250)
     elif method == "vanilla":
         if deconflict_minority_model is not None:
             # W4 deconfliction: pooled vanilla reward drives the update; minority RM is
@@ -2659,7 +2292,6 @@ if __name__ == "__main__":
     user_id = args.user_id
     seed = args.seed
     proportion = args.proportion
-    k = args.k
     alpha = args.alpha
     # Dataset
     batch_size = 16
@@ -2674,12 +2306,11 @@ if __name__ == "__main__":
 
     # Load reward model based on method (returns hub_id_or_ids for normalization lookup)
     reward_model, reward_tokenizer, reward_model_hub_id_or_ids = load_reward_model(
-        method, user_id, seed, proportion, k, alpha, device,
+        method, user_id, seed, proportion, alpha, device,
         max_new_tokens=args.max_new_tokens,
         vanilla_rm_hub_id=args.vanilla_rm_hub_id,
         maxmin_minority_rm_hub_id=args.maxmin_minority_rm_hub_id,
         maxmin_majority_rm_hub_id=args.maxmin_majority_rm_hub_id,
-        sharedrep_rm_hub_id=args.sharedrep_rm_hub_id,
         rm_load_kwargs=rm_load_kwargs,
     )
     # Reward normalization: used for maxmin only (vanilla always uses raw RM logits).
@@ -2706,7 +2337,7 @@ if __name__ == "__main__":
     if accelerator.is_main_process:
         print(f"Policy base model: {policy_model_name}  (LoRA: {use_lora})")
         print(f"Value base model:  {value_model_name}")
-    policy_hub_id = args.policy_hub_id or get_policy_hub_id(method, user_id, seed, proportion, k, alpha)
+    policy_hub_id = args.policy_hub_id or get_policy_hub_id(method, user_id, seed, proportion, alpha)
     # Distinguish windowed-intervention runs when the hub id is auto-derived (so the
     # early-only / late-only / full runs don't overwrite each other).
     if _pcgrad_window["enabled"] and not args.policy_hub_id:
@@ -2837,7 +2468,7 @@ if __name__ == "__main__":
 
     # Set up reward function based on method
     setup_reward_function(
-        method, policy_tokenizer, reward_tokenizer, reward_model, alpha, proportion,
+        method, policy_tokenizer, reward_tokenizer, reward_model,
         deconflict_minority_model=_deconflict_min_model,
         deconflict_minority_tok=_deconflict_min_tok,
     )
@@ -2911,7 +2542,7 @@ if __name__ == "__main__":
 
     # Train
     callbacks = []
-    if method in ("maxmin", "sharedrep", "gold"):
+    if method == "maxmin":
         callbacks.append(GroupSelectionCallback())
     if diag_callback is not None:
         callbacks.append(diag_callback)

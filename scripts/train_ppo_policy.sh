@@ -1,8 +1,7 @@
 #!/bin/bash
 # Train PPO policies over methods and alpha values.
 #
-# Methods (--method): vanilla, maxmin, sharedrep, gold, gold_vanilla, pcgrad,
-#   sumgrad, mgda. The multi-objective combiners (pcgrad/sumgrad/mgda) reuse the
+# Methods (--method): vanilla, maxmin, pcgrad, sumgrad, mgda. The multi-objective combiners (pcgrad/sumgrad/mgda) reuse the
 #   MaxMin minority/majority reward models. mgda = MGDA min-norm common-descent
 #   (Sener & Koltun 2018, arXiv:1810.04650).
 #

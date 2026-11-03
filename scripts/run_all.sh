@@ -5,8 +5,8 @@
 #
 # Runs all 4 stages end-to-end:
 #   Stage 1: Dataset preparation (generate responses, score, create pairs)
-#   Stage 2: Reward model training (vanilla, maxmin, sharedrep)
-#   Stage 3: PPO policy training (gold, vanilla, maxmin, sharedrep)
+#   Stage 2: Reward model training (vanilla, maxmin)
+#   Stage 3: PPO policy training (vanilla, maxmin)
 #   Stage 4: Evaluation (generate responses from policies, score them)
 #
 # Usage:
@@ -85,13 +85,12 @@ echo ""
 USER_ID="${USER_ID:-mxcui}"
 SEED="${SEED:-42}"
 PROPORTION="${PROPORTION:-0.2}"
-K="${K:-64}"                       # SharedRep inner hidden dimension
 NUM_RESPONSES="${NUM_RESPONSES:-2}" # Responses per prompt for dataset creation
 EVAL_MAX_NEW_TOKENS="${EVAL_MAX_NEW_TOKENS:-128}"  # Max new tokens for evaluation generation (fixed)
 
 # Methods to train and evaluate
-# Options: gold, vanilla, maxmin, sharedrep
-METHODS="${METHODS:-gold vanilla maxmin sharedrep}"
+# Options: vanilla, maxmin
+METHODS="${METHODS:-vanilla maxmin}"
 
 # Alpha values to sweep
 ALPHAS="${ALPHAS:-0.5}"
@@ -104,7 +103,7 @@ SKIP_EVAL="${SKIP_EVAL:-0}"
 
 # method:alpha combinations to skip in PPO and Eval stages.
 # Useful when some combinations are already trained / evaluated correctly.
-# Example: SKIP_COMBOS="gold:0.5 vanilla:0.5"
+# Example: SKIP_COMBOS="maxmin:0.5 vanilla:0.5"
 SKIP_COMBOS="${SKIP_COMBOS:-}"
 
 # Set NO_REWARD_NORM=1 to disable reward normalization in PPO (use raw RM logits)
@@ -155,8 +154,6 @@ for METHOD in "${METHODS_ARRAY[@]}"; do
         case "$METHOD" in
             vanilla)  TOTAL_REWARD=$((TOTAL_REWARD + 1)); TOTAL_PPO=$((TOTAL_PPO + 1)); TOTAL_EVAL=$((TOTAL_EVAL + 1)) ;;
             maxmin)   TOTAL_REWARD=$((TOTAL_REWARD + 2)); TOTAL_PPO=$((TOTAL_PPO + 1)); TOTAL_EVAL=$((TOTAL_EVAL + 1)) ;;  # 2 = minority + majority
-            sharedrep) TOTAL_REWARD=$((TOTAL_REWARD + 1)); TOTAL_PPO=$((TOTAL_PPO + 1)); TOTAL_EVAL=$((TOTAL_EVAL + 1)) ;;
-            gold)     TOTAL_PPO=$((TOTAL_PPO + 1)); TOTAL_EVAL=$((TOTAL_EVAL + 1)) ;;  # No reward training needed
         esac
     done
 done
@@ -173,7 +170,6 @@ echo " Configuration:"
 echo "   User ID:       $USER_ID"
 echo "   Seed:          $SEED"
 echo "   Proportion:    $PROPORTION"
-echo "   K (SharedRep): $K"
 echo "   Num responses: $NUM_RESPONSES"
 echo "   Methods:       ${METHODS_ARRAY[*]}"
 echo "   Alphas:        ${ALPHAS_ARRAY[*]}"
@@ -303,26 +299,7 @@ train_reward_models_for_alpha() {
                 echo ""
                 ;;
 
-            sharedrep)
-                REWARD_COUNTER=$((REWARD_COUNTER + 1))
-                echo "  [$REWARD_COUNTER/$COUNTER_END] SharedRep reward (alpha=$TARGET_ALPHA, k=$K)..."
-                stage_timer_start
-                SHAREDREP_HUB_ID="${USER_ID}/sharedrep-imdb-reward-ALPHA${TARGET_ALPHA}-len${MAX_NEW_TOKENS}-k${K}"
-                "$PYTHON" src/imdb/reward_training/sharedrep_reward_training.py \
-                    --user_id "$USER_ID" \
-                    --seed "$SEED" \
-                    --proportion "$PROPORTION" \
-                    --alpha "$TARGET_ALPHA" \
-                    --k "$K" \
-                    --hub_model_id "$SHAREDREP_HUB_ID" \
-                    --model_hub_id "$MODEL_HUB_ID"
-                stage_timer_end
-                echo ""
-                ;;
 
-            gold)
-                # Gold uses a pre-trained sentiment classifier, no reward training needed
-                ;;
         esac
     done
 }
@@ -348,7 +325,6 @@ else
             case "$METHOD" in
                 vanilla)  REWARD_COUNTER=$((REWARD_COUNTER + 1)) ;;
                 maxmin)   REWARD_COUNTER=$((REWARD_COUNTER + 2)) ;;
-                sharedrep) REWARD_COUNTER=$((REWARD_COUNTER + 1)) ;;
             esac
         done
     done
@@ -360,7 +336,6 @@ else
                 vanilla)   echo "    $USER_ID/vanilla-imdb-reward-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}" ;;
                 maxmin)    echo "    $USER_ID/maxmin-imdb-reward-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-minority"
                            echo "    $USER_ID/maxmin-imdb-reward-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-majority" ;;
-                sharedrep) echo "    $USER_ID/sharedrep-imdb-reward-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-k${K}" ;;
             esac
         done
     done
@@ -401,9 +376,6 @@ else
                 --proportion "$PROPORTION"
                 --alpha "$ALPHA"
             )
-            if [ "$METHOD" = "sharedrep" ]; then
-                PPO_ARGS+=(--k "$K")
-            fi
             if [ "$NO_REWARD_NORM" = "1" ]; then
                 PPO_ARGS+=(--no_reward_normalization)
             fi
@@ -420,10 +392,8 @@ else
     for METHOD in "${METHODS_ARRAY[@]}"; do
         for ALPHA in "${ALPHAS_ARRAY[@]}"; do
             case "$METHOD" in
-                gold)      echo "    $USER_ID/gold-imdb-ppo-alpha${ALPHA}-seed${SEED}" ;;
                 vanilla)   echo "    $USER_ID/vanilla-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}" ;;
                 maxmin)    echo "    $USER_ID/maxmin-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}" ;;
-                sharedrep) echo "    $USER_ID/sharedrep-imdb-ppo-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-k${K}" ;;
             esac
         done
     done
@@ -464,12 +434,7 @@ else
                 --alpha "$ALPHA"
                 --max_new_tokens "$EVAL_MAX_NEW_TOKENS"
             )
-            if [ "$METHOD" != "gold" ]; then
-                EVAL_ARGS+=(--proportion "$PROPORTION")
-            fi
-            if [ "$METHOD" = "sharedrep" ]; then
-                EVAL_ARGS+=(--k "$K")
-            fi
+            EVAL_ARGS+=(--proportion "$PROPORTION")
 
             echo "  [$EVAL_COUNTER/$TOTAL_EVAL] Evaluate $METHOD (alpha=$ALPHA)"
 
@@ -503,12 +468,7 @@ else
                 --method "$METHOD"
                 --alpha "$ALPHA"
             )
-            if [ "$METHOD" != "gold" ]; then
-                READ_ARGS+=(--proportion "$PROPORTION")
-            fi
-            if [ "$METHOD" = "sharedrep" ]; then
-                READ_ARGS+=(--k "$K")
-            fi
+            READ_ARGS+=(--proportion "$PROPORTION")
             "$PYTHON" src/imdb/evaluation/read_evaluation_scores.py "${READ_ARGS[@]}" || true
 
             echo ""
@@ -519,10 +479,8 @@ else
     for METHOD in "${METHODS_ARRAY[@]}"; do
         for ALPHA in "${ALPHAS_ARRAY[@]}"; do
             case "$METHOD" in
-                gold)      echo "    $USER_ID/gold-imdb-ppo-eval-alpha${ALPHA}-seed${SEED}" ;;
                 vanilla)   echo "    $USER_ID/vanilla-imdb-ppo-eval-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}" ;;
                 maxmin)    echo "    $USER_ID/maxmin-imdb-ppo-eval-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}" ;;
-                sharedrep) echo "    $USER_ID/sharedrep-imdb-ppo-eval-prop${PROPORTION}-alpha${ALPHA}-seed${SEED}-k${K}" ;;
             esac
         done
     done

@@ -13,27 +13,19 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Read and analyze evaluation scores from scored datasets.")
     parser.add_argument("--user_id", type=str, required=True, help="Hugging Face user ID.")
     parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--proportion", type=float, default=None, help="Proportion of minority group (required for maxmin, sharedrep, vanilla).")
-    parser.add_argument("--k", type=int, default=None, help="Inner hidden dimension size (required for sharedrep method).")
+    parser.add_argument("--proportion", type=float, default=None, help="Proportion of minority group (required for all methods).")
     parser.add_argument("--alpha", type=float, default=1.0, help="Alpha value for scores (default: 1.0).")
-    parser.add_argument("--method", type=str, required=True, choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla"])
+    parser.add_argument("--method", type=str, required=True, choices=["vanilla", "maxmin", "pcgrad", "sumgrad", "mgda"])
     parser.add_argument("--output_csv", type=str, default=None, help="Optional: Save results to CSV file.")
     return parser.parse_args()
 
 
-def load_scored_dataset(user_id, method, seed, proportion, k, alpha):
+def load_scored_dataset(user_id, method, seed, proportion, alpha):
     """Load the scored evaluation dataset from HuggingFace Hub."""
-    if method == "gold":
-        dataset_name = f"{user_id}/{method}-imdb-ppo-eval-alpha{alpha}-seed{seed}"
-    elif method == "gold_vanilla":
-        dataset_name = f"{user_id}/gold-vanilla-imdb-ppo-eval-prop{proportion}-alpha{alpha}-seed{seed}"
-    elif method == "maxmin":
-        dataset_name = f"{user_id}/{method}-imdb-ppo-eval-prop{proportion}-alpha{alpha}-seed{seed}"
-    elif method == "sharedrep":
-        dataset_name = f"{user_id}/{method}-imdb-ppo-eval-prop{proportion}-alpha{alpha}-seed{seed}-k{k}"
-    elif method == "vanilla":
-        dataset_name = f"{user_id}/{method}-imdb-ppo-eval-prop{proportion}-alpha{alpha}-seed{seed}"
-    
+    if method not in ["vanilla", "maxmin", "pcgrad", "sumgrad", "mgda"]:
+        raise ValueError(f"Unknown method: {method}")
+    dataset_name = f"{user_id}/{method}-imdb-ppo-eval-prop{proportion}-alpha{alpha}-seed{seed}"
+
     # Load dataset - handle both DatasetDict and Dataset cases
     loaded_dataset = load_dataset(dataset_name)
     # If it's a DatasetDict, select the first available split (usually 'train')
@@ -136,16 +128,14 @@ if __name__ == "__main__":
     args = parse_args()
     
     # Validate required arguments
-    if args.method in ["maxmin", "sharedrep", "vanilla", "gold_vanilla"] and args.proportion is None:
+    if args.method in ["vanilla", "maxmin", "pcgrad", "sumgrad", "mgda"] and args.proportion is None:
         raise ValueError(f"--proportion is required for {args.method} method")
-    if args.method == "sharedrep" and args.k is None:
-        raise ValueError("--k is required for sharedrep method")
     
     # Load dataset
     print(f"Loading evaluation dataset for method: {args.method}")
     dataset = load_scored_dataset(
         args.user_id, args.method, args.seed, 
-        args.proportion, args.k, args.alpha
+        args.proportion, args.alpha
     )
     
     # Analyze scores
