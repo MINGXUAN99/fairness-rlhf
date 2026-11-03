@@ -6,7 +6,7 @@ Research code for studying how heterogeneous preferences become policy updates i
 
 Poor minority alignment does not necessarily imply an unavoidable trade-off between groups. The manuscript reports three main findings:
 
-- **Minority collapse can occur while group rewards remain positively correlated.** Vanilla RLHF exhibits a sharp decline near preference divergence \(\alpha = 0.75\), where the measured reward correlation is approximately 0.65.
+- **Minority collapse can occur while group rewards remain positively correlated.** Vanilla RLHF exhibits a sharp decline near preference divergence $\alpha = 0.75$, where the measured reward correlation is approximately 0.65.
 - **Harmful gradient alignment is strongest early in training.** PPO updates initially oppose minority reward improvement; later positive alignment does not necessarily restore minority performance.
 - **How group gradients are combined matters.** Worst-group selection and direct gradient summation help under moderate heterogeneity, while gradient conflict correction method (PCGrad and MGDA) retain stronger worst-group performance under larger divergence.
 
@@ -29,7 +29,7 @@ $$
 
 The manuscript varies $\alpha$ from 0.5 to 1.3. At 0.5 the rewards are identical; at 1.0 each group values a different attribute; above 1.0 each group assigns a negative coefficient to the other attribute. The measured reward correlation becomes negative in this last regime.
 
-Policy optimization uses **mean per-token KL** regularization to reduce confounding from response length. Evaluation reports oracle group rewards, worst-group reward $F=\min(J_{\mathrm{min}},J_{\mathrm{maj}})$, and population utility $U=0.2J_{\mathrm{min}}+0.8J_{\mathrm{maj}}$.
+Policy optimization uses **mean per-token KL** regularization to reduce confounding from response length. Evaluation reports oracle group rewards, worst-group reward $F=\min(J_{\mathrm{min}},J_{\mathrm{maj}})$, and population utility $U=20\\% \times J_{\mathrm{min}}+80 \\% \times J_{\mathrm{maj}}$.
 
 ## Methods
 
@@ -51,7 +51,7 @@ For SumGrad, PCGrad, and MGDA, the KL-related policy gradient is added separatel
 
 Vanilla RLHF exhibits worst-group collapse while group rewards remain positively correlated. MaxMin improves performance under moderate divergence, while PCGrad maintains higher worst-group rewards as preferences become more conflicting. Click the figure to open the vector PDF.
 
-The manuscript additionally compares Vanilla, MaxMin, and PCGrad on Pythia-160M and Llama-3.2-1B at α = 1.0, observing minority collapse and recovery beyond GPT-2.
+The manuscript additionally compares Vanilla, MaxMin, and PCGrad on Pythia-160M and Llama-3.2-1B at $\alpha = 1.0$, observing minority collapse and recovery beyond GPT-2.
 
 ## Setup
 
@@ -81,7 +81,7 @@ export CUDA_VISIBLE_DEVICES=0
 
 ## Run the experiments
 
-Run commands from the repository root. Start with one preference setting; the examples below use \(\alpha = 1.0\).
+Run commands from the repository root. Start with one preference setting; the examples below use $\alpha = 1.0$.
 
 ### 1. Build preference datasets
 
