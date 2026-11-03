@@ -2,6 +2,8 @@
 
 Research code for studying how heterogeneous preferences become policy updates in reinforcement learning from human feedback (RLHF). On a controlled IMDb benchmark, we distinguish **value-level conflict** between group preferences from **optimization-level interference** between their learning signals.
 
+Check out the [Project Page](https://www.duo-zhou.com/projects/gradient-interference-rlhf/) for more details.
+
 ## Overview
 
 Poor minority alignment does not necessarily imply an unavoidable trade-off between groups. The manuscript reports three main findings:
