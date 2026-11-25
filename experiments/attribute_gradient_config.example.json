@@ -1,0 +1,32 @@
+{
+  "run_id": "gpt2-alpha075-seed42-pilot",
+  "seed": 42,
+  "alpha": 0.75,
+  "device": "cuda",
+  "output_dir": "../results/conciseness_gradient_collapse/gpt2-alpha075-seed42-pilot",
+  "prompts_file": "attribute_prompts.example.jsonl",
+  "policy_tokenizer": {"path": "gpt2", "revision": "main"},
+  "sentiment_model": {
+    "path": "lvwerra/distilbert-imdb", "revision": "main",
+    "padding_side": "right", "positive_label_index": 1
+  },
+  "minority_model": {
+    "path": "REPLACE_WITH_VERIFIED_MINORITY_REWARD_MODEL", "revision": "main", "padding_side": "right"
+  },
+  "reward": {
+    "length_source": "scorer", "length_denominator": 512,
+    "scorer_max_length": 512, "text_scope": "prompt_response", "clip_conciseness": true
+  },
+  "sampling": {
+    "max_new_tokens": 512, "max_prompt_tokens": 32, "responses_per_prompt": 4,
+    "temperature": 1.0, "top_p": 1.0, "top_k": 0
+  },
+  "diagnostic": {
+    "batch_size": 4, "blocks": 4, "early_every": 25, "early_until": 300, "late_every": 100,
+    "shared_scale": 1.0, "cosine_floor": 1e-10
+  },
+  "save_all_rollouts": false,
+  "save_checkpoint_updates": [0, 100, 300],
+  "save_final_checkpoint": true,
+  "checkpoints": []
+}

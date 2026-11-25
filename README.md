@@ -171,6 +171,8 @@ bash scripts/train_ppo_policy.sh
 
 These traces are written under `diagnostics/`. Additional diagnostic tools cover vanilla/group gradient alignment, reward-scale comparisons, and reward calibration in [src/imdb/diagnostics](src/imdb/diagnostics).
 
+For the conciseness-gradient experiment, see the [run guide and measurement fields](experiments/run_attribute_diagnostics.md). It provides opt-in vanilla PPO instrumentation, offline checkpoint diagnostics, and an analysis notebook for attribute-gradient magnitudes and actual update contributions.
+
 
 ## Repository layout
 

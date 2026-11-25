@@ -6,7 +6,7 @@ Branch: `experiment/conciseness-gradient-collapse`.
 
 Parent: `naacl_rebuttal` at `398ac6a` (also the current local `main` commit when this branch was created).
 
-Status: experiment design only. No new training, gradient measurements, or claimed results. This plan addresses WFDb's third weakness in [the reviews](../review/review.md), especially why minority performance remains poor after gradient alignment becomes positive. It refines the temporal experiment proposed in [the rebuttal strategy](../review/rebuttal_strategy.md).
+Status: diagnostics implemented; see the shorter [run guide and output-field list](run_attribute_diagnostics.md). No project training, GPU evaluation, or research results have been obtained. This plan addresses WFDb's third weakness in [the reviews](../review/review.md), especially why minority performance remains poor after gradient alignment becomes positive. It refines the temporal experiment proposed in [the rebuttal strategy](../review/rebuttal_strategy.md).
 
 ## Measurement checklist: what we will collect
 

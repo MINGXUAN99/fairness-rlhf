@@ -89,7 +89,19 @@ def _patch_ppo_kl_to_mean_per_token():
         "                non_score_reward = -args.kl_coef * kl_mean_per_seq.unsqueeze(1).expand_as(kl)"
     )
     if old_kl_block in source and new_kl_block not in source:
-        source = source.replace(old_kl_block, new_kl_block)
+        # Attribute hooks compile a dedented function. Match the actual block
+        # indentation instead of assuming getsource returned a class method.
+        import re
+        source = re.sub(
+            r"(?m)^([ \t]*)non_score_reward = -args\.kl_coef \* kl$",
+            lambda match: (
+                match[1] + "# Use mean KL per token\n"
+                + match[1] + "kl_mean_per_seq = kl.sum(1) / sequence_lengths_p1.clamp(min=1)\n"
+                + match[1] + "non_score_reward = -args.kl_coef * kl_mean_per_seq.unsqueeze(1).expand_as(kl)"
+            ),
+            source,
+            count=1,
+        )
         # Replace: mean_kl = kl.sum(1).mean()
         source = source.replace("mean_kl = kl.sum(1).mean()", "mean_kl = kl_mean_per_seq.mean()")
         # Dedent so exec works at module level (getsource returns class-indented code)
@@ -1915,6 +1927,12 @@ def parse_args():
     parser.add_argument("--no_push", action="store_true",
                         help="Skip all Hub pushes and local model saving (diagnostic/pre-check runs). "
                              "Diagnostic CSVs are still written during training.")
+    parser.add_argument("--local_only", action="store_true",
+                        help="Save locally without any Hub uploads (unlike --no_push, keeps the final model).")
+    parser.add_argument("--attribute_diag_config", type=str, default=None,
+                        help="Opt-in attribute-gradient experiment JSON; single-process vanilla full fine-tuning only.")
+    parser.add_argument("--rollout_response_length", type=int, default=None,
+                        help="Explicit PPO generation cap. Required with --attribute_diag_config; otherwise preserves TRL default.")
     parser.add_argument(
         "--sumgrad_normalize",
         action="store_true",
@@ -2178,6 +2196,34 @@ if __name__ == "__main__":
 
     args = parse_args()
 
+    attribute_config = None
+    if args.local_only and args.no_push:
+        raise ValueError("Choose --local_only (local save) or --no_push (no final save), not both")
+    if args.rollout_response_length is not None and args.rollout_response_length < 1:
+        raise ValueError("--rollout_response_length must be positive")
+    if args.attribute_diag_config:
+        if args.method != "vanilla" or args.vanilla_deconflict or args.diag_every > 0:
+            raise ValueError("Attribute diagnostics require vanilla PPO without other diagnostic/intervention patches")
+        if accelerator.num_processes != 1:
+            raise ValueError("Attribute diagnostics currently require one process")
+        if not args.local_only:
+            raise ValueError("Attribute experiments require --local_only to keep model artifacts local")
+        from src.imdb.diagnostics.attribute_gradient_runner import load_config, load_prompts
+        from src.imdb.diagnostics.attribute_training_probe import install_hooks
+        attribute_config = load_config(args.attribute_diag_config)
+        load_prompts(attribute_config["prompts_file"])
+        if attribute_config["alpha"] != args.alpha or attribute_config["seed"] != args.seed:
+            raise ValueError("Diagnostic config alpha/seed must match training alpha/seed")
+        if args.rollout_response_length != attribute_config["sampling"]["max_new_tokens"]:
+            raise ValueError("Set --rollout_response_length explicitly to the diagnostic max_new_tokens")
+        if attribute_config["policy_tokenizer"]["path"] != args.policy_model_name:
+            raise ValueError("Diagnostic policy_tokenizer.path must match --policy_model_name")
+        if resolve_use_lora(args.use_lora, args.policy_model_name):
+            raise ValueError("Initial attribute experiment supports full fine-tuning; disable LoRA")
+        from transformers import set_seed
+        set_seed(args.seed)
+        install_hooks(_experimental_ppo_module)
+
     # Apply TRL training-loop patches.
     # PCGrad and SumGrad share the same multi-gradient patch (includes optional
     # mean-KL normalisation); they differ only in how the two group gradients
@@ -2430,7 +2476,7 @@ if __name__ == "__main__":
         bf16=True,
         learning_rate=args.learning_rate,
         eval_on_start=False,  # Disabled to save time - evaluation happens at end anyway
-        push_to_hub=(not args.no_push),
+        push_to_hub=(not args.no_push and not args.local_only),
         save_strategy="no",
         hub_private_repo=_hf_private,
         hub_model_id=policy_hub_id,
@@ -2443,6 +2489,8 @@ if __name__ == "__main__":
         stop_token="eos",
         kl_coef=args.kl_coef,
         gradient_checkpointing=args.gradient_checkpointing,
+        **({"response_length": args.rollout_response_length} if args.rollout_response_length is not None else {}),
+        **({"seed": seed, "data_seed": seed} if attribute_config else {}),
     )
 
     # ── W4 deconfliction: load the minority group RM as a guard (vanilla only) ──
@@ -2558,6 +2606,9 @@ if __name__ == "__main__":
         eval_dataset=eval_dataset,
         callbacks=callbacks,
     )
+    if attribute_config is not None:
+        from src.imdb.diagnostics.attribute_training_probe import AttributeTrainingProbe
+        trainer.attribute_probe = AttributeTrainingProbe(attribute_config, policy, policy_tokenizer, training_args)
     trainer.train()
 
     # Flush any remaining SumGrad cosine-diagnostic rows.
@@ -2571,7 +2622,7 @@ if __name__ == "__main__":
 
     if accelerator.is_main_process and not args.no_push:
         print("\n" + "="*80)
-        print("SAVING MODEL TO HUGGINGFACE HUB")
+        print("SAVING MODEL LOCALLY" if args.local_only else "SAVING MODEL TO HUGGINGFACE HUB")
         print("="*80)
         
         # Unwrap the model from accelerator
@@ -2603,30 +2654,31 @@ if __name__ == "__main__":
         policy_tokenizer.save_pretrained(local_policy_output_dir)
         print("✓ Local model copy saved.")
         
-        # Push model and tokenizer to hub with weights
-        try:
-            print("Pushing model to Hub...")
-            commit_info = unwrapped_policy.push_to_hub(
-                policy_hub_id,
-                private=_hf_private,
-                commit_message=f"Upload {policy_hub_id} model weights"
-            )
-            print(f"✓ Model pushed successfully!")
-            print(f"  Commit URL: {commit_info.commit_url if hasattr(commit_info, 'commit_url') else 'N/A'}")
+        if not args.local_only:
+            # Push model and tokenizer to hub with weights
+            try:
+                print("Pushing model to Hub...")
+                commit_info = unwrapped_policy.push_to_hub(
+                    policy_hub_id,
+                    private=_hf_private,
+                    commit_message=f"Upload {policy_hub_id} model weights"
+                )
+                print(f"✓ Model pushed successfully!")
+                print(f"  Commit URL: {commit_info.commit_url if hasattr(commit_info, 'commit_url') else 'N/A'}")
 
-            print("Pushing tokenizer to Hub...")
-            tokenizer_commit = policy_tokenizer.push_to_hub(policy_hub_id, private=_hf_private)
-            print(f"✓ Tokenizer pushed successfully!")
+                print("Pushing tokenizer to Hub...")
+                tokenizer_commit = policy_tokenizer.push_to_hub(policy_hub_id, private=_hf_private)
+                print(f"✓ Tokenizer pushed successfully!")
 
-        except Exception as e:
-            print(f"\n{'!'*80}")
-            print(f"ERROR: Failed to push model/tokenizer to Hub!")
-            print(f"{'!'*80}")
-            print(f"Error: {e}")
-            print(f"\nPlease manually upload the model:")
-            print(f"  1. Local copy is saved at: {local_policy_output_dir}")
-            print(f"  2. Free Hub storage or make the repo public, then push that directory to '{policy_hub_id}'")
-            raise
+            except Exception as e:
+                print(f"\n{'!'*80}")
+                print(f"ERROR: Failed to push model/tokenizer to Hub!")
+                print(f"{'!'*80}")
+                print(f"Error: {e}")
+                print(f"\nPlease manually upload the model:")
+                print(f"  1. Local copy is saved at: {local_policy_output_dir}")
+                print(f"  2. Free Hub storage or make the repo public, then push that directory to '{policy_hub_id}'")
+                raise
         
         print("="*80)
         print("MODEL SAVED SUCCESSFULLY")
@@ -2637,7 +2689,7 @@ if __name__ == "__main__":
     # full model we just pushed above with a bare adapter — corrupting the repo.
     # So only call it for full fine-tuning; for LoRA the merged model + tokenizer
     # were already pushed above and we skip the dataset-card push.
-    if accelerator.is_main_process and not use_lora and not args.no_push:
+    if accelerator.is_main_process and not use_lora and not args.no_push and not args.local_only:
         try:
             trainer.push_to_hub(dataset_name=dataset_name)
         except Exception as e:
