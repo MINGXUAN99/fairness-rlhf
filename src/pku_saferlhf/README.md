@@ -129,3 +129,105 @@ groups and all training modes, and check that exported models reload:
 OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
   python -m unittest src.pku_saferlhf.test_train_reward
 ```
+
+## Policy training
+
+After producing the three reward checkpoints, use `train_policy.py` for Vanilla,
+MaxMin, SumGrad, and PCGrad. The script reuses the existing PPO patch and gradient
+combination functions in `src/imdb/ppo_training/unified_ppo_training.py`. It has a
+separate task entry point, full instruction prompts, and reward inference that
+uses each reward model's complete backbone and scoring head.
+
+Use an isolated policy environment: PPO is tested with TRL 0.24.0 and Transformers
+4.56.2, while the reward-training environment pins Transformers 4.51.3. Install the
+appropriate CUDA build of torch on the GPU host before the remaining requirements.
+
+```bash
+python3 -m venv tmp/policy-venv
+tmp/policy-venv/bin/python -m pip install -r src/pku_saferlhf/requirements-policy.txt
+```
+
+Run all four methods from the same policy initialization and reward checkpoints:
+
+```bash
+for method in vanilla maxmin sumgrad pcgrad; do
+  tmp/policy-venv/bin/python -m src.pku_saferlhf.train_policy \
+    --method "$method" \
+    --policy_model YOUR_BASE_MODEL \
+    --pooled_rm output/pku-reward-pooled-seed42 \
+    --harmlessness_rm output/pku-reward-harmlessness-seed42 \
+    --helpfulness_rm output/pku-reward-helpfulness-seed42 \
+    --output_dir "output/pku-policy-${method}-seed42" \
+    --seed 42 --training_mode full --precision bf16 \
+    --batch_size 16 --reward_batch_size 4 \
+    --max_prompt_length 512 --response_length 256 \
+    --total_episodes 50000 --ppo_epochs 3 --kl_coef 0.1
+done
+```
+
+Reward checkpoint arguments accept local directories or Hub model IDs. Vanilla
+loads only the pooled model; the other methods load the same two complete group
+models. When present, the reward checkpoint's `run_config.json` supplies its
+training format and context limit. Otherwise `--reward_format` and
+`--reward_max_length` supply explicit fallbacks. Upload that metadata alongside
+reward weights when moving checkpoints to the Hub. Hub revisions resolved at
+startup are recorded in the policy run configuration.
+
+### Method behavior
+
+| Method | Reward and policy update |
+|---|---|
+| Vanilla | Pooled reward with standard PPO |
+| MaxMin | Select the lowest mean raw group reward over the full rollout batch, then use that group's per-response rewards |
+| SumGrad | Sum both group policy gradients, then add the KL gradient |
+| PCGrad | Project conflicting components from both group gradients, sum them, then add the KL gradient |
+
+No reward calibration or group-gradient normalization is applied. Existing PPO
+reward/advantage whitening remains enabled. SumGrad and PCGrad use the mean of
+the two scores for the shared value target, and separate group advantage streams
+for policy updates, matching the existing implementation. Group order is
+harmlessness first and helpfulness second.
+
+All methods use one rollout batch and one minibatch, with gradient accumulation
+fixed at 1. `--batch_size` must be at least 8 for whitening. Reward-model forward
+passes can be split using `--reward_batch_size`, but MaxMin selection happens
+after all scores are collected, so it remains a full-batch decision. Lowering
+reward batch size does not reduce policy rollout memory. Only single-process
+training is supported in this entry point. TRL can round the episode budget up
+to the next complete batch; the trainer state records actual episodes.
+
+`--training_mode lora` adapts the policy and uses the adapter-disabled base as its
+reference. `full` uses a separate frozen reference. Both modes train a value
+model from the same base architecture and export a complete final policy. The
+two frozen reward models remain independent in both modes. These choices can
+require substantial GPU memory; choose model size and batch size accordingly.
+
+Only unique prompts from the dataset's **train** split enter PPO. Long prompts
+are excluded and counted rather than truncated into incomplete instructions.
+The original prompt is retained for reward formatting; completions are decoded
+and formatted separately with each reward tokenizer. A distinct policy pad token
+is added if necessary to avoid treating EOS as padding. The script never uses
+test prompts or creates a validation split. TRL's required eval-dataloader
+placeholder uses training prompts with sampling and evaluation disabled.
+
+Outputs include final policy/tokenizer files, `run_config.json`,
+`trainer_state.json`, and `reward_trace.jsonl` (raw group means and MaxMin's selected
+group). SumGrad/PCGrad additionally write `gradient_cosine.csv`. These are training
+diagnostics; independent policy evaluation remains a separate step. Model upload
+is not automatic. Outputs are protected against accidental overwrites.
+
+The default KL convention is `--kl_div mean_kl`, reusing the IMDb implementation;
+`total` keeps TRL's sum convention. The PPO source patch is checked before
+SumGrad/PCGrad training and raises an error on incompatible source instead of
+silently running standard PPO. Use a fresh process for each method.
+
+Offline CPU smoke tests train all four methods on tiny local models, test LoRA
+export, verify full-batch MaxMin selection, and compare independent reward scores:
+
+```bash
+OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
+  tmp/policy-venv/bin/python -m unittest src.pku_saferlhf.test_train_policy
+```
+
+These tests verify the implementation path, not model quality or GPU memory fit.
+The real reward models must be trained before launching the full policy runs.

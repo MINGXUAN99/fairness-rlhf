@@ -1,0 +1,9 @@
+# Use a separate environment from requirements-training.txt.
+# Install the appropriate CUDA build of torch first on the GPU host.
+torch>=2.7,<2.9
+transformers==4.56.2
+trl==0.24.0
+accelerate==1.10.1
+peft==0.15.2
+datasets==4.5.0
+huggingface-hub>=0.34,<1

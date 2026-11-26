@@ -37,18 +37,19 @@ Train three reward models from the single dataset's training split:
 | Harmlessness | group_id = 0 |
 | Pooled | All rows |
 
-Train three policies from the same initialization:
+Train four policies from the same initialization:
 
 | Method | Reward signal |
 |---|---|
 | Vanilla | Pooled reward model |
 | MaxMin | Lowest batch-mean raw score from the two group reward models |
+| SumGrad | Sum both group policy gradients without conflict correction |
 | PCGrad | Both group objectives, with conflicting gradients corrected |
 
 Do not add reward calibration or normalization of model scores. Preserve the
 existing PPO whitening convention separately and consistently. Log raw reward
 scales, since MaxMin selection depends on their relative offsets and scales.
-MaxMin and PCGrad must use the same two group reward models. If the backbones are
+MaxMin, SumGrad, and PCGrad must use the same two group reward models. If the backbones are
 adapted separately, load both complete models; a shared backbone with two scoring
 heads is valid only when the backbone weights are identical.
 
@@ -74,7 +75,7 @@ group win rate, 80/20 population-weighted win rate, unsafe-response rate, and ac
 KL. Reference-relative win rates are not absolute safety guarantees or cardinal
 utilities. Training reward scores are diagnostics rather than independent outcomes.
 
-Produce a table comparing the initial policy, Vanilla, MaxMin, and PCGrad; plots
+Produce a table comparing the initial policy, Vanilla, MaxMin, SumGrad, and PCGrad; plots
 of group outcomes over training; gradient conflict and update-alignment traces;
 and a joint helpfulness versus harmlessness plot. Report individual seeds and
 paired prompt uncertainty without conflating it with training-seed variability.
@@ -89,8 +90,8 @@ benefit from correction is a valid outcome. No results are assumed in advance.
 1. Prepare and inspect the CPU-only group-labeled dataset.
 2. Train the helpfulness, harmlessness, and pooled reward models.
 3. Adapt prompt loading and complete reward-model loading in PPO.
-4. Run Vanilla, MaxMin, and PCGrad and independently evaluate outcomes.
+4. Run Vanilla, MaxMin, SumGrad, and PCGrad and independently evaluate outcomes.
 
 Exact model choices and training budgets remain to be fixed before training.
 Reversed population mixtures and original-label safety comparisons are optional
-follow-up experiments, outside the initial three-method run.
+follow-up experiments, outside the initial four-method run.

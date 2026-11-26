@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys, os
 FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(FILE_DIR, "../../.."))
@@ -17,14 +19,21 @@ try:
 except ImportError:
     trl_experimental_utils = None
 
-from trl.experimental.ppo import PPOConfig, PPOTrainer
+try:
+    from trl.experimental.ppo import PPOConfig, PPOTrainer
+    _ppo_module_path = "trl.experimental.ppo.ppo_trainer"
+except ImportError:
+    # TRL 0.24 keeps the same PPO implementation in trl.trainer.
+    from trl.trainer.ppo_config import PPOConfig
+    from trl.trainer.ppo_trainer import PPOTrainer
+    _ppo_module_path = "trl.trainer.ppo_trainer"
 from transformers import TrainerCallback
 from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
 # The actual PPOTrainer with get_reward lives in trl.experimental.ppo.ppo_trainer,
 # even though `from trl import PPOTrainer` returns a thin wrapper in trl.trainer.ppo_trainer.
 # We must monkey-patch get_reward in the EXPERIMENTAL module where it is actually used.
-_experimental_ppo_module = importlib.import_module("trl.experimental.ppo.ppo_trainer")
+_experimental_ppo_module = importlib.import_module(_ppo_module_path)
 
 # Save a reference to the ORIGINAL get_reward before any monkey-patching.
 # This is critical: our custom reward functions need to fall back to the original
@@ -43,7 +52,10 @@ if _original_get_reward is None and trl_experimental_utils is not None:
 # they will immediately be masked to 0 anyway by the subsequent masked_fill.
 # ---------------------------------------------------------------------------
 _original_masked_whiten = _experimental_ppo_module.masked_whiten
-_original_masked_var = _experimental_ppo_module.masked_var
+if hasattr(_experimental_ppo_module, "masked_var"):
+    _original_masked_var = _experimental_ppo_module.masked_var
+else:
+    from trl.core import masked_var as _original_masked_var
 
 
 def _safe_masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
@@ -123,7 +135,7 @@ def _patch_ppo_kl_to_mean_per_token():
 # 6 targeted PCGrad edits in a single getsource → exec round trip.
 # ---------------------------------------------------------------------------
 
-def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
+def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None, strict=False) -> None:
     """
     Patch PPOTrainer.train to perform two-objective multi-gradient PPO.
 
@@ -147,10 +159,19 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
     Optionally also applies the mean-KL-per-token normalisation (same as
     _patch_ppo_kl_to_mean_per_token) within the same source pass so that both
     patches can share a single getsource → exec round trip.
+    With strict=True, require every expected source block before installing the
+    patched function; unsupported TRL versions fail before training starts.
     """
+    def replace_once(source, old, new, count=1):
+        if strict and source.count(old) != 1:
+            raise RuntimeError("Unsupported TRL PPO source; required patch block missing: " + old[:100])
+        return source.replace(old, new, count)
+
     try:
         source = inspect.getsource(_experimental_ppo_module.PPOTrainer.train)
     except (TypeError, OSError):
+        if strict:
+            raise RuntimeError("Cannot inspect TRL PPO source")
         return
 
     # Inject helpers into TRL's module namespace so the patched train body
@@ -174,9 +195,11 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
             "                kl_mean_per_seq = kl.sum(1) / sequence_lengths_p1.clamp(min=1)\n"
             "                non_score_reward = -args.kl_coef * kl_mean_per_seq.unsqueeze(1).expand_as(kl)"
         )
+        if strict and old_kl not in source:
+            raise RuntimeError("Unsupported TRL KL implementation")
         if old_kl in source:
-            source = source.replace(old_kl, new_kl, 1)
-            source = source.replace(
+            source = replace_once(source, old_kl, new_kl, 1)
+            source = replace_once(source,
                 "mean_kl = kl.sum(1).mean()",
                 "mean_kl = kl_mean_per_seq.mean()",
                 1,
@@ -197,8 +220,10 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                queries = data["input_ids"].to(device)'
     )
     if old_c1 not in source:
+        if strict:
+            raise RuntimeError("Unsupported TRL rollout implementation")
         return  # TRL version mismatch – skip rather than corrupt training
-    source = source.replace(old_c1, new_c1, 1)
+    source = replace_once(source, old_c1, new_c1, 1)
 
     # ── Change 2: concatenate per-group rewards after the rollout loop ─────
     old_c2 = (
@@ -212,7 +237,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                _pcgrad_state["scores_r2"] = torch.cat(_pcgrad_state["scores_r2_list"], 0)\n'
         '                values = torch.cat(values, 0)'
     )
-    source = source.replace(old_c2, new_c2, 1)
+    source = replace_once(source, old_c2, new_c2, 1)
 
     # ── Change 3: compute per-group advantages after the combined ones ─────
     old_c3 = (
@@ -235,7 +260,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                    actual_start, actual_end, gen_length, args)\n'
         '                empty_cache()'
     )
-    source = source.replace(old_c3, new_c3, 1)
+    source = replace_once(source, old_c3, new_c3, 1)
 
     # ── Change 4a: slice per-group mini-batch advantages ───────────────────
     old_c4a = '                            mb_advantage = advantages[micro_batch_inds]'
@@ -245,7 +270,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                            mb_advantage_r1 = advantages_r1[micro_batch_inds]\n'
         '                            mb_advantage_r2 = advantages_r2[micro_batch_inds]'
     )
-    source = source.replace(old_c4a, new_c4a, 1)
+    source = replace_once(source, old_c4a, new_c4a, 1)
 
     # ── Change 4b: replace single backward+step with PCGrad update ─────────
     old_c4b = (
@@ -268,7 +293,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                                model, accelerator, optimizer,\n'
         '                                pg_loss_kl, pg_loss_r1, pg_loss_r2, vf_loss, args)'
     )
-    source = source.replace(old_c4b, new_c4b, 1)
+    source = replace_once(source, old_c4b, new_c4b, 1)
 
     # ── Change 5: update the mini-batch del block ──────────────────────────
     # Remove `loss` (no longer created); add PCGrad-specific variables.
@@ -290,7 +315,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                        mb_values, mb_responses, mb_query_responses, mb_logprobs, _mb_mask,\n'
         '                    )'
     )
-    source = source.replace(old_del_mb, new_del_mb, 1)
+    source = replace_once(source, old_del_mb, new_del_mb, 1)
 
     # ── Change 6: update the outer del block to include new advantage tensors
     # (entries are indented 16 spaces in TRL's source, not 20).
@@ -301,7 +326,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                scores_r1, scores_r2,\n'
         '                returns,'
     )
-    source = source.replace(old_del_outer, new_del_outer, 1)
+    source = replace_once(source, old_del_outer, new_del_outer, 1)
 
     # Compile and install
     source = textwrap.dedent(source)
@@ -741,7 +766,7 @@ def _pcgrad_compute_pg_loss(
     pg_l  = -adv * ratio
     pg_l2 = -adv * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
     # masked_mean lives in _experimental_ppo_module – access through the import
-    from trl.experimental.ppo.ppo_trainer import masked_mean as _trl_masked_mean
+    _trl_masked_mean = _experimental_ppo_module.masked_mean
     return _trl_masked_mean(torch.max(pg_l, pg_l2), mask)
 
 
