@@ -1,0 +1,7 @@
+# Install a torch build appropriate for the GPU/CUDA version first.
+torch>=2.7,<2.9
+transformers==4.51.3
+accelerate==1.10.1
+peft==0.15.2
+datasets>=2.12,<5
+huggingface-hub>=0.30,<1
