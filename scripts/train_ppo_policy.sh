@@ -1,8 +1,7 @@
 #!/bin/bash
 # Train PPO policies over methods and alpha values.
 #
-# Methods (--method): vanilla, maxmin, sharedrep, gold, gold_vanilla, pcgrad,
-#   sumgrad, mgda. The multi-objective combiners (pcgrad/sumgrad/mgda) reuse the
+# Methods (--method): vanilla, maxmin, pcgrad, sumgrad, mgda. The multi-objective combiners (pcgrad/sumgrad/mgda) reuse the
 #   MaxMin minority/majority reward models. mgda = MGDA min-norm common-descent
 #   (Sener & Koltun 2018, arXiv:1810.04650).
 #
@@ -96,10 +95,6 @@ GRAD_CKPT_ARG=()
 # LOAD_IN_4BIT_FROZEN=1 to enable (needs bitsandbytes>=0.45 on Blackwell).
 LOAD_4BIT_ARG=()
 [ "${LOAD_IN_4BIT_FROZEN:-0}" = "1" ] && LOAD_4BIT_ARG=(--load_in_4bit_frozen)
-# Launcher: single GPU (plain python) by default to match the legacy GPT-2 run.
-# For multi-GPU Qwen training set:
-#   LAUNCHER="accelerate launch --config_file accelerate_config_ddp.yaml"
-ACCEL_CONFIG="${ACCEL_CONFIG:-accelerate_config_ddp.yaml}"
 # Learning rate (default 3e-6 legacy; ~1.4e-5 is the standard TRL sentiment-PPO
 # value — raise if objective/scores stays flat, i.e. the policy isn't learning).
 LEARNING_RATE="${LEARNING_RATE:-3e-6}"
@@ -247,10 +242,7 @@ for METHOD in "${METHODS_ARRAY[@]}"; do
             echo "Conflict CSV:    $COSINE_CSV"
         fi
 
-        # Launcher: plain python (single GPU) by default. Override for multi-GPU:
-        #   LAUNCHER="accelerate launch --config_file $ACCEL_CONFIG"
-        LAUNCHER="${LAUNCHER:-$PYTHON}"
-        $LAUNCHER src/imdb/ppo_training/unified_ppo_training.py \
+        "$PYTHON" src/imdb/ppo_training/unified_ppo_training.py \
             --method "$METHOD" \
             --policy_model_name "$POLICY_MODEL_NAME" \
             "${VALUE_ARG[@]}" \

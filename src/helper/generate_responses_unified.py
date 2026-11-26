@@ -116,12 +116,10 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed (evaluation mode only)")
     parser.add_argument("--method", type=str, default=None,
-                        choices=["gold", "gold_vanilla", "maxmin", "sharedrep", "vanilla", "pcgrad", "sumgrad", "mgda"],
+                        choices=["vanilla", "maxmin", "pcgrad", "sumgrad", "mgda"],
                         help="Method name (evaluation mode only)")
     parser.add_argument("--proportion", type=float, default=None,
-                        help="Minority proportion (evaluation mode, required for maxmin/sharedrep/gold_vanilla/vanilla)")
-    parser.add_argument("--k", type=int, default=None,
-                        help="Hidden dimension (evaluation mode, required for sharedrep)")
+                        help="Minority proportion (required in evaluation mode)")
     parser.add_argument("--alpha", type=float, default=1.0,
                         help="Alpha value (evaluation mode, default: 1.0)")
     parser.add_argument("--policy_hub_id", type=str, default=None,
@@ -146,10 +144,8 @@ def validate_args(args):
             raise ValueError("--seed is required for evaluation mode")
         if args.method is None:
             raise ValueError("--method is required for evaluation mode")
-        if args.method in ["maxmin", "sharedrep", "vanilla", "gold_vanilla", "pcgrad", "sumgrad", "mgda"] and args.proportion is None:
+        if args.method in ["vanilla", "maxmin", "pcgrad", "sumgrad", "mgda"] and args.proportion is None:
             raise ValueError(f"--proportion is required for {args.method} method")
-        if args.method == "sharedrep" and args.k is None:
-            raise ValueError("--k is required for sharedrep method")
 
 
 def get_model_and_dataset_info(args):
@@ -171,19 +167,9 @@ def get_model_and_dataset_info(args):
         if args.policy_hub_id:
             model_name = args.policy_hub_id
             output_hub_id = args.policy_hub_id.replace("-ppo-", "-ppo-eval-", 1)
-        elif args.method == "gold":
-            # Gold uses alpha (defines group preferences for MaxMin objective)
-            model_name = f"{args.user_id}/{args.method}-imdb-ppo-alpha{args.alpha}-seed{args.seed}"
-            output_hub_id = f"{args.user_id}/{args.method}-imdb-ppo-eval-alpha{args.alpha}-seed{args.seed}"
-        elif args.method == "gold_vanilla":
-            model_name = f"{args.user_id}/gold-vanilla-imdb-ppo-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
-            output_hub_id = f"{args.user_id}/gold-vanilla-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
         elif args.method == "maxmin":
             model_name = f"{args.user_id}/{args.method}-imdb-ppo-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
             output_hub_id = f"{args.user_id}/{args.method}-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
-        elif args.method == "sharedrep":
-            model_name = f"{args.user_id}/{args.method}-imdb-ppo-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}-k{args.k}"
-            output_hub_id = f"{args.user_id}/{args.method}-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}-k{args.k}"
         elif args.method == "vanilla":
             model_name = f"{args.user_id}/{args.method}-imdb-ppo-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
             output_hub_id = f"{args.user_id}/{args.method}-imdb-ppo-eval-prop{args.proportion}-alpha{args.alpha}-seed{args.seed}"
