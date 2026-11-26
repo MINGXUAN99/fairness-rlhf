@@ -64,16 +64,24 @@ variability conditional on the trained reward models.
 
 Evaluate reward-model preference accuracy on test pairs per group. Evaluate policy
 responses on unique test prompts. New generated responses do not have dataset
-oracle scores; independent helpfulness and harmlessness evaluation is still needed.
-Choose and freeze that evaluator and its rubrics before final policy comparisons.
-Use blinded response order and audit a sample with human judgments. Report evaluator
-agreement with held-out labels without tuning it on final test outcomes.
+oracle scores. The initial automated evaluation uses frozen external
+`PKU-Alignment/beaver-7b-v1.0-reward` and `PKU-Alignment/beaver-7b-v1.0-cost`
+checkpoints. Record immutable evaluator revisions and score all methods using
+identical input formatting. These models are separate from our training reward
+models but were also trained on PKU-SafeRLHF; they are not independent ground truth.
 
-Compare each policy with a fixed initial-policy response for each prompt. Report
-helpfulness and harmlessness win rates, counting ties as one half. Report minimum
-group win rate, 80/20 population-weighted win rate, unsafe-response rate, and achieved
-KL. Reference-relative win rates are not absolute safety guarantees or cardinal
-utilities. Training reward scores are diagnostics rather than independent outcomes.
+Generate each policy's response to the same held-out prompts, including a frozen
+initial-policy baseline. Report mean helpfulness reward (higher is better), mean
+harmfulness cost (lower is better), and paired differences from the baseline.
+Keep the two scores separate: their scales do not justify a minimum or weighted
+average. Cost is not an unsafe probability. Include prompt-bootstrap intervals,
+per-seed results, and across-seed standard deviations as distinct uncertainty
+summaries. Achieved KL remains a training diagnostic.
+
+As corroboration, use blinded human or separate LLM judgments on a sample with
+separate helpfulness and safety criteria and ties allowed. Win rates and an
+unsafe-response rate require these additional judgments; the initial scorer
+does not infer them from arbitrary raw-score thresholds.
 
 Produce a table comparing the initial policy, Vanilla, MaxMin, SumGrad, and PCGrad; plots
 of group outcomes over training; gradient conflict and update-alignment traces;

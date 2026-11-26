@@ -1,0 +1,8 @@
+# Standalone inference/scoring environment; also compatible with the policy env.
+# Install the appropriate CUDA torch build first on the GPU host.
+torch>=2.7,<2.9
+transformers==4.56.2
+datasets==4.5.0
+huggingface-hub>=0.34,<1
+numpy>=1.24
+sentencepiece>=0.2

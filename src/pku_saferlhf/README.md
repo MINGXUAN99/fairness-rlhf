@@ -1,5 +1,8 @@
 # PKU SafeRLHF data preparation
 
+For transfer to a GPU server and the complete experiment sequence, follow the
+[GPU runbook](../../experiments/pku_gpu_runbook.md).
+
 Prepare one Hugging Face dataset with `train` and `test` splits. Each row has
 `prompt`, `chosen`, `rejected`, and `group_id`. Group 0 is harmlessness (20% by
 default), and group 1 is helpfulness (80%). Response fields do not include the
@@ -231,3 +234,120 @@ OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
 
 These tests verify the implementation path, not model quality or GPU memory fit.
 The real reward models must be trained before launching the full policy runs.
+
+## Generate and evaluate policy responses
+
+The evaluation pipeline uses the initial policy and the four trained policies on
+one shared set of unique **test** prompts. It reports continuous helpfulness
+reward (higher is better) and harmfulness cost (lower is better), without combining
+their different scales. No training reward model is used as the evaluator.
+
+Use the policy environment, adding the evaluation dependencies:
+
+```bash
+tmp/policy-venv/bin/python -m pip install -r src/pku_saferlhf/requirements-evaluation.txt
+```
+
+Copy `evaluation_policies.example.json` to a run configuration, replace
+`YOUR_BASE_MODEL`, and check the four trained checkpoint paths. Every entry needs
+a unique `run_id`, a `method`, a `training_seed` (null for the initial policy), and
+a `model` path or Hub ID. Add entries with different training seeds to compare
+multiple runs. An optional `revision` pins a Hub model. Set `prompt_format` to
+match policy training; local checkpoint metadata supplies it when available.
+
+### 1 Generate responses
+
+```bash
+tmp/policy-venv/bin/python -m src.pku_saferlhf.generate_responses \
+  --policies src/pku_saferlhf/evaluation_policies.example.json \
+  --output_dir output/pku-evaluation/generation \
+  --max_prompt_length 512 --max_new_tokens 256 --batch_size 8 \
+  --device cuda --precision bf16
+```
+
+Greedy decoding is the default. `--sample --temperature 0.7 --top_p 0.9` enables
+sampling with the same generation seed and settings for all policies. Keep the
+same batch size for reproducible sampled reruns. `--max_prompts 100` selects a
+seeded subset for a pilot; omit it for all eligible prompts.
+
+Prompts are deduplicated by whitespace-normalized text. A prompt is retained only
+if its full formatted input fits every policy's prompt and context budgets. Thus
+all policies receive exactly the same prompts; exclusions, model revisions,
+formatting, and decoding settings are recorded. Each model is loaded separately.
+`responses.jsonl` contains run ID, prompt ID/text, generated response, token count,
+and EOS status. The manifest marks interrupted runs incomplete, so downstream
+steps reject partial comparisons. Existing output directories are not overwritten.
+
+### 2 Score with frozen external models
+
+```bash
+tmp/policy-venv/bin/python -m src.pku_saferlhf.evaluate_responses \
+  --generation_dir output/pku-evaluation/generation \
+  --output_dir output/pku-evaluation/scored \
+  --batch_size 4 --max_length 2048 --device cuda --precision bf16
+```
+
+Default evaluators:
+
+- [Beaver reward](https://huggingface.co/PKU-Alignment/beaver-7b-v1.0-reward): `helpfulness_reward`.
+- [Beaver cost](https://huggingface.co/PKU-Alignment/beaver-7b-v1.0-cost): `harmfulness_cost`.
+
+Both are 7B models. They are loaded sequentially, so only one evaluator occupies
+device memory at a time. The scorer resolves and records immutable Hub revisions.
+Use `--helpfulness_revision` and `--cost_revision` to reproduce a specific run.
+
+`beaver_scorer.py` is an inference-only checkpoint adapter built on the native
+Transformers Llama backbone. It loads the actual `score_head` weight and bias and
+scores the last nonpadding token. Missing model/head weights cause an error;
+normalization-enabled checkpoints are unsupported. This avoids adding the older
+safe-rlhf training package to the environment. Its checkpoint contract and pooling
+were checked against the [official score-model implementation](https://github.com/PKU-Alignment/safe-rlhf/tree/main/safe_rlhf/models/score_model).
+
+Evaluator inputs follow the official conversation format and append EOS, as in
+the [official preference preprocessing](https://github.com/PKU-Alignment/safe-rlhf/blob/main/safe_rlhf/datasets/preference.py).
+The script does not recalibrate model outputs or interpret cost as a probability.
+Inputs exceeding the evaluator context fail by default. Explicit
+`--allow_truncation` right-truncates them and flags every affected score; truncating
+a response can hide relevant content, so inspect those counts before reporting.
+
+Output is `scored_responses.jsonl` plus a manifest containing evaluator IDs,
+revisions, score directions, and truncation counts. Full pretrained 7B inference
+has not been run by the offline tests; verify a small real-model pilot before the
+full experiment.
+
+### 3 Summarize results
+
+```bash
+tmp/policy-venv/bin/python -m src.pku_saferlhf.summarize_results \
+  --scored_dir output/pku-evaluation/scored \
+  --output_dir output/pku-evaluation/summary \
+  --reference_run initial --bootstrap_samples 2000
+```
+
+Outputs:
+
+- `per_run.csv`: mean scores, 95% prompt-bootstrap intervals, truncation counts,
+  and response lengths for each checkpoint.
+- `paired_differences.csv`: score differences relative to the specified reference
+  on matching prompts, with paired bootstrap intervals. Positive helpfulness and
+  negative cost differences indicate improvement.
+- `per_method.csv`: mean of run means and standard deviation across training
+  runs. A single run has no across-run standard deviation; duplicate training
+  seeds within a method are rejected.
+- `summary.json`: the same results with evaluator/generation provenance and
+  uncertainty definitions.
+
+Prompt intervals do not measure training-seed variability. All runs must have
+the same prompt IDs, with no missing or duplicated responses. Do not take a
+minimum or weighted average of the two raw evaluator scores. Neither score is
+an oracle: Beaver was also trained on PKU-SafeRLHF. Blinded human or separate LLM
+judgments remain useful corroboration, especially for any claimed safety gains.
+The model cards specify noncommercial licenses.
+
+Offline evaluation tests exercise generation, both scorers, file checks, paired
+summaries, truncation handling, and rejection of a missing scoring head:
+
+```bash
+OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
+  tmp/policy-venv/bin/python -m unittest src.pku_saferlhf.test_evaluation
+```

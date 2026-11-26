@@ -1,0 +1,7 @@
+[
+  {"run_id": "initial", "method": "initial", "training_seed": null, "model": "YOUR_BASE_MODEL", "prompt_format": "auto"},
+  {"run_id": "vanilla-42", "method": "vanilla", "training_seed": 42, "model": "output/pku-policy-vanilla-seed42"},
+  {"run_id": "maxmin-42", "method": "maxmin", "training_seed": 42, "model": "output/pku-policy-maxmin-seed42"},
+  {"run_id": "sumgrad-42", "method": "sumgrad", "training_seed": 42, "model": "output/pku-policy-sumgrad-seed42"},
+  {"run_id": "pcgrad-42", "method": "pcgrad", "training_seed": 42, "model": "output/pku-policy-pcgrad-seed42"}
+]

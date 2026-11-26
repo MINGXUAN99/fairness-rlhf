@@ -11,7 +11,7 @@ from src.helper.model_utils import configure_tokenizer
 from src.pku_saferlhf.reward_utils import format_response
 
 
-def prepare_prompts(rows, tokenizer, max_length, mode="auto"):
+def prepare_prompts(rows, tokenizer, max_length, mode="auto", reject_pad_in_prompt=True):
     """Retain unique full prompts; skip overlength prompts instead of truncating."""
     records, lookup, seen = [], {}, set()
     skipped = 0
@@ -31,7 +31,7 @@ def prepare_prompts(rows, tokenizer, max_length, mode="auto"):
         if not ids or len(ids) > max_length:
             skipped += 1
             continue
-        if tokenizer.pad_token_id in ids:
+        if reject_pad_in_prompt and tokenizer.pad_token_id in ids:
             raise ValueError("Prompt contains the reserved policy padding token")
         key = tuple(ids)
         if key in lookup and lookup[key] != prompt:
