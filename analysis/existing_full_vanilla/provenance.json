@@ -1,0 +1,209 @@
+{
+  "runs": {
+    "Full": {
+      "id": "541g6ruj",
+      "url": "https://wandb.ai/mxcui-none/huggingface/runs/541g6ruj",
+      "arguments": [
+        "--method",
+        "pcgrad",
+        "--policy_model_name",
+        "gpt2",
+        "--user_id",
+        "mxcui",
+        "--seed",
+        "42",
+        "--proportion",
+        "0.2",
+        "--alpha",
+        "0.8",
+        "--max_new_tokens",
+        "512",
+        "--kl_coef",
+        "0.1",
+        "--kl_div",
+        "mean_kl",
+        "--no_reward_normalization",
+        "--maxmin_minority_rm_hub_id",
+        "mxcui/maxmin-imdb-reward-ALPHA0.8-len512-minority-gpt2",
+        "--maxmin_majority_rm_hub_id",
+        "mxcui/maxmin-imdb-reward-ALPHA0.8-len512-majority-gpt2"
+      ],
+      "git": {
+        "remote": "https://github.com/MINGXUAN99/fairness-rlhf.git",
+        "commit": "ca7a7cf8d281938f15b44c0c1a9b58a996940258"
+      },
+      "config": {
+        "seed": 42,
+        "bf16": true,
+        "fp16": false,
+        "response_length": 53,
+        "batch_size": 64,
+        "num_total_batches": 782,
+        "learning_rate": 3e-06,
+        "kl_coef": 0.1,
+        "whiten_rewards": true,
+        "stop_token": "<STOP_TOKEN>",
+        "missing_eos_penalty": 0,
+        "hub_model_id": "mxcui/pcgrad-imdb-ppo-prop0.2-alpha0.8-seed42",
+        "max_grad_norm": 1,
+        "num_ppo_epochs": 3,
+        "temperature": 0.7,
+        "_name_or_path": "gpt2",
+        "dtype": "float32",
+        "torch_dtype": null,
+        "transformers_version": "5.9.0",
+        "gradient_accumulation_steps": 1
+      },
+      "cosine_keys": []
+    },
+    "Vanilla_long": {
+      "id": "wp3u80m8",
+      "url": "https://wandb.ai/mxcui-none/huggingface/runs/wp3u80m8",
+      "arguments": [
+        "--method",
+        "vanilla",
+        "--policy_model_name",
+        "gpt2",
+        "--user_id",
+        "mxcui",
+        "--seed",
+        "43",
+        "--proportion",
+        "0.2",
+        "--alpha",
+        "0.8",
+        "--max_new_tokens",
+        "512",
+        "--kl_coef",
+        "0.1",
+        "--kl_div",
+        "mean_kl",
+        "--policy_hub_id",
+        "mxcui/vanilla-imdb-ppo-prop0.2-alpha0.8-seed43-mean_kl0.1-gpt2",
+        "--no_reward_normalization",
+        "--vanilla_rm_hub_id",
+        "mxcui/vanilla-imdb-reward-ALPHA0.8-len512-gpt2",
+        "--maxmin_minority_rm_hub_id",
+        "mxcui/maxmin-imdb-reward-ALPHA0.8-len512-minority-gpt2",
+        "--maxmin_majority_rm_hub_id",
+        "mxcui/maxmin-imdb-reward-ALPHA0.8-len512-majority-gpt2"
+      ],
+      "git": {
+        "remote": "https://github.com/MINGXUAN99/fairness-rlhf.git",
+        "commit": "01049a560516ef58ca4e8b3dd9e229b96511d35e"
+      },
+      "config": {
+        "seed": 42,
+        "dtype": "float32",
+        "hub_model_id": "mxcui/vanilla-imdb-ppo-prop0.2-alpha0.8-seed43-mean_kl0.1-gpt2",
+        "num_total_batches": 782,
+        "response_length": 53,
+        "kl_coef": 0.1
+      },
+      "cosine_keys": []
+    },
+    "Vanilla_diagnostic": {
+      "id": "20n9qhn5",
+      "url": "https://wandb.ai/mxcui-none/huggingface/runs/20n9qhn5",
+      "arguments": [
+        "--method",
+        "vanilla",
+        "--user_id",
+        "mxcui",
+        "--seed",
+        "44",
+        "--proportion",
+        "0.2",
+        "--alpha",
+        "0.8",
+        "--max_new_tokens",
+        "512",
+        "--kl_coef",
+        "0.1",
+        "--kl_div",
+        "mean_kl",
+        "--no_reward_normalization",
+        "--policy_model_name",
+        "gpt2",
+        "--policy_hub_id",
+        "mxcui/vanilla-imdb-ppo-prop0.2-alpha0.8-seed44-mean_kl0.1-gpt2-grad-decomp",
+        "--vanilla_rm_hub_id",
+        "mxcui/vanilla-imdb-reward-ALPHA0.8-len512-gpt2",
+        "--diag_every",
+        "5",
+        "--diag_beta",
+        "0.1",
+        "--diag_max_prompts",
+        "128",
+        "--diag_batch_size",
+        "16",
+        "--diag_max_new_tokens",
+        "200",
+        "--diag_output_path",
+        "results/online_gradient_cosine_alpha08_seed44_decomp_beta01.csv"
+      ],
+      "git": {
+        "remote": "https://github.com/MINGXUAN99/fairness-rlhf.git",
+        "commit": "ca7a7cf8d281938f15b44c0c1a9b58a996940258"
+      },
+      "config": {
+        "seed": 42,
+        "dtype": "float32",
+        "hub_model_id": "mxcui/vanilla-imdb-ppo-prop0.2-alpha0.8-seed44-mean_kl0.1-gpt2-grad-decomp",
+        "num_total_batches": 782,
+        "response_length": 53,
+        "kl_coef": 0.1
+      },
+      "cosine_keys": []
+    },
+    "Vanilla_older": {
+      "id": "f8v0lc6k",
+      "url": "https://wandb.ai/mxcui-none/huggingface/runs/f8v0lc6k",
+      "arguments": [
+        "--method",
+        "vanilla",
+        "--user_id",
+        "mxcui",
+        "--seed",
+        "42",
+        "--proportion",
+        "0.2",
+        "--alpha",
+        "0.8"
+      ],
+      "git": null,
+      "config": {
+        "seed": 42,
+        "dtype": "float32",
+        "hub_model_id": "mxcui/vanilla-imdb-ppo-prop0.2-alpha0.8-seed42",
+        "num_total_batches": 782,
+        "response_length": 53,
+        "kl_coef": 0.05
+      },
+      "cosine_keys": []
+    }
+  },
+  "cosine_values_available": false,
+  "panel_decoding": "Upstream PPO completion panels use temperature 0.01, not the 0.7 training rollout temperature; panels have eight held-out prompts per snapshot.",
+  "datasets": {
+    "Vanilla_long": {
+      "repo": "mxcui/vanilla-imdb-ppo-eval-prop0.2-alpha0.8-seed43-mean_kl0.1-gpt2",
+      "revision": "24173d99385d977ebff1cfcaefca0946d3e002d7",
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "data/train-00000-of-00001.parquet"
+      ]
+    },
+    "Full": {
+      "repo": "mxcui/pcgrad-imdb-ppo-eval-prop0.2-alpha0.8-seed43",
+      "revision": "690ff99b77ad76f30f4dfaba9a3ffdfcb0742342"
+    }
+  },
+  "limits": [
+    "Exact evaluation checkpoint revisions are not embedded in the dataset rows; run associations follow naming and response patterns.",
+    "Full and vanilla use different prompt panels and objectives; reward model revisions and software stack are not fully matched.",
+    "Diagnostic-run launch requested seed44 but resolved PPO seed is42; this is not an independent training seed comparison.",
+    "No raw cosine CSV or logged cosine keys recovered, including for the diagnostic run."
+  ]
+}

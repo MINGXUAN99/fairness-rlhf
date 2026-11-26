@@ -1,0 +1,522 @@
+{
+  "source_run": "/home/mx/fairness-rlhf/runs/windowed-len53-batch64-seed43-20261012_195052",
+  "bootstrap_replicates": 5000,
+  "uncertainty_scope": "Prompt sampling conditional on these two trained policies; one stochastic response per prompt per snapshot; no training-seed inference.",
+  "selection": "Exploratory, after seeing endpoints; no confirmatory significance claims.",
+  "arm_audits": {
+    "Early": {
+      "blocks": [
+        {
+          "arm": "Early",
+          "first_update": 1,
+          "last_update": 400,
+          "train_length": 51.870546875,
+          "train_eos_rate": 0.0480859375,
+          "train_cap_rate": 0.9530859375,
+          "gradient_count": 1200,
+          "conflict_count": 25,
+          "projection_count": 25,
+          "mean_cosine": 0.198702872530861,
+          "negative_cosine_mean": -0.049173465019359826,
+          "sum_gradient_opposes_minority_count": 0,
+          "sum_gradient_opposes_majority_count": 0,
+          "conflict_correction_relative_to_sum_mean": 0.049173465019359826,
+          "outer_update_learning_rate_sum": 0.0009827213725465706,
+          "lr_weighted_relative_correction_proxy": 3.1434551660527005e-06
+        },
+        {
+          "arm": "Early",
+          "first_update": 401,
+          "last_update": 800,
+          "train_length": 51.844375,
+          "train_eos_rate": 0.0486328125,
+          "train_cap_rate": 0.9525,
+          "gradient_count": 1200,
+          "conflict_count": 58,
+          "projection_count": 0,
+          "mean_cosine": 0.1926152792257474,
+          "negative_cosine_mean": -0.04030302175034957,
+          "sum_gradient_opposes_minority_count": 0,
+          "sum_gradient_opposes_majority_count": 0,
+          "conflict_correction_relative_to_sum_mean": 0.04030302175034957,
+          "outer_update_learning_rate_sum": 0.00021877862745342953,
+          "lr_weighted_relative_correction_proxy": 0.0
+        }
+      ],
+      "learned_minority_reward_correlations": {
+        "conciseness": 0.3268269190606194,
+        "sentiment": 0.11453213988258283,
+        "reward_min": 0.21717289887554161,
+        "generation_length": -0.36203565471994836
+      },
+      "raw_group_reward_correlation": 0.48185667860839376,
+      "training_eos_strata": {
+        "True": {
+          "count": 2476,
+          "learned_reward_means": [
+            1.0670225185030688,
+            1.6824474481080383
+          ],
+          "conciseness": 0.8626707012318255,
+          "sentiment": 0.7324898111446263,
+          "reward_min": 0.8366345232143857,
+          "generation_length": 29.373990306946688
+        },
+        "False": {
+          "count": 48724,
+          "learned_reward_means": [
+            -0.5470662281711097,
+            0.8768663402916215
+          ],
+          "conciseness": 0.7664458704899023,
+          "sentiment": 0.667514415727131,
+          "reward_min": 0.7466595795373482,
+          "generation_length": 53.0
+        }
+      },
+      "evaluation_strata": {
+        "0": {
+          "short_le53_count": 8,
+          "short_le20_count": 1,
+          "eos_count": 55,
+          "eos_length_mean": 141.85454545454544,
+          "cap_count": 201
+        },
+        "400": {
+          "short_le53_count": 13,
+          "short_le20_count": 4,
+          "eos_count": 61,
+          "eos_length_mean": 123.27868852459017,
+          "cap_count": 195
+        },
+        "550": {
+          "short_le53_count": 15,
+          "short_le20_count": 7,
+          "eos_count": 61,
+          "eos_length_mean": 124.88524590163935,
+          "cap_count": 196
+        },
+        "800": {
+          "short_le53_count": 14,
+          "short_le20_count": 5,
+          "eos_count": 66,
+          "eos_length_mean": 125.8030303030303,
+          "cap_count": 190
+        }
+      }
+    },
+    "Late": {
+      "blocks": [
+        {
+          "arm": "Late",
+          "first_update": 1,
+          "last_update": 400,
+          "train_length": 51.8462109375,
+          "train_eos_rate": 0.0491796875,
+          "train_cap_rate": 0.9518359375,
+          "gradient_count": 1200,
+          "conflict_count": 60,
+          "projection_count": 0,
+          "mean_cosine": 0.20430865399350856,
+          "negative_cosine_mean": -0.03929792881209105,
+          "sum_gradient_opposes_minority_count": 0,
+          "sum_gradient_opposes_majority_count": 0,
+          "conflict_correction_relative_to_sum_mean": 0.03929792881209105,
+          "outer_update_learning_rate_sum": 0.0009827213725465706,
+          "lr_weighted_relative_correction_proxy": 0.0
+        },
+        {
+          "arm": "Late",
+          "first_update": 401,
+          "last_update": 800,
+          "train_length": 51.8617578125,
+          "train_eos_rate": 0.04859375,
+          "train_cap_rate": 0.9524609375,
+          "gradient_count": 1200,
+          "conflict_count": 51,
+          "projection_count": 51,
+          "mean_cosine": 0.19324180147135317,
+          "negative_cosine_mean": -0.05252423952398781,
+          "sum_gradient_opposes_minority_count": 0,
+          "sum_gradient_opposes_majority_count": 0,
+          "conflict_correction_relative_to_sum_mean": 0.05252423952398781,
+          "outer_update_learning_rate_sum": 0.00021877862745342953,
+          "lr_weighted_relative_correction_proxy": 1.144665171743613e-06
+        }
+      ],
+      "learned_minority_reward_correlations": {
+        "conciseness": 0.3349886571159026,
+        "sentiment": 0.12542774980989665,
+        "reward_min": 0.22989950064482045,
+        "generation_length": -0.36213266405772776
+      },
+      "raw_group_reward_correlation": 0.4819043554753721,
+      "training_eos_strata": {
+        "True": {
+          "count": 2503,
+          "learned_reward_means": [
+            1.074380474570652,
+            1.7001084660321677
+          ],
+          "conciseness": 0.8617034558529765,
+          "sentiment": 0.7312086450678895,
+          "reward_min": 0.8356044936959591,
+          "generation_length": 29.55773072313224
+        },
+        "False": {
+          "count": 48697,
+          "learned_reward_means": [
+            -0.543429265064481,
+            0.8741274124239863
+          ],
+          "conciseness": 0.766719940396739,
+          "sentiment": 0.6671724600057589,
+          "reward_min": 0.746810444318543,
+          "generation_length": 53.0
+        }
+      },
+      "evaluation_strata": {
+        "0": {
+          "short_le53_count": 8,
+          "short_le20_count": 1,
+          "eos_count": 55,
+          "eos_length_mean": 141.85454545454544,
+          "cap_count": 201
+        },
+        "400": {
+          "short_le53_count": 10,
+          "short_le20_count": 3,
+          "eos_count": 62,
+          "eos_length_mean": 126.2741935483871,
+          "cap_count": 195
+        },
+        "550": {
+          "short_le53_count": 15,
+          "short_le20_count": 5,
+          "eos_count": 71,
+          "eos_length_mean": 115.91549295774648,
+          "cap_count": 185
+        },
+        "800": {
+          "short_le53_count": 8,
+          "short_le20_count": 3,
+          "eos_count": 51,
+          "eos_length_mean": 125.03921568627452,
+          "cap_count": 205
+        }
+      }
+    }
+  },
+  "paired_early_minus_late": {
+    "update400": {
+      "generation_length": {
+        "difference": -0.20703125,
+        "prompt_bootstrap_95_interval": [
+          -10.71103515625,
+          10.332128906249999
+        ]
+      },
+      "conciseness": {
+        "difference": -0.00347900390625,
+        "prompt_bootstrap_95_interval": [
+          -0.0438568115234375,
+          0.03614959716796873
+        ]
+      },
+      "sentiment": {
+        "difference": 0.02742257403951953,
+        "prompt_bootstrap_95_interval": [
+          -0.02102249275549184,
+          0.07335497466083324
+        ]
+      },
+      "reward_min": {
+        "difference": 0.002701311682903908,
+        "prompt_bootstrap_95_interval": [
+          -0.031504233603336616,
+          0.03641206290401895
+        ]
+      },
+      "reward_maj": {
+        "difference": 0.021242258450365623,
+        "prompt_bootstrap_95_interval": [
+          -0.01823891394364182,
+          0.059336378470979924
+        ]
+      },
+      "eos": {
+        "difference": -0.00390625,
+        "prompt_bootstrap_95_interval": [
+          -0.07421875,
+          0.06640625
+        ]
+      }
+    },
+    "update800": {
+      "generation_length": {
+        "difference": -7.4765625,
+        "prompt_bootstrap_95_interval": [
+          -17.64462890625,
+          2.703613281249993
+        ]
+      },
+      "conciseness": {
+        "difference": 0.0267791748046875,
+        "prompt_bootstrap_95_interval": [
+          -0.011326217651367185,
+          0.06488075256347656
+        ]
+      },
+      "sentiment": {
+        "difference": 0.021097489165185834,
+        "prompt_bootstrap_95_interval": [
+          -0.025790506299290427,
+          0.06855344435407458
+        ]
+      },
+      "reward_min": {
+        "difference": 0.02564283767678717,
+        "prompt_bootstrap_95_interval": [
+          -0.006358087160006112,
+          0.05773144982699705
+        ]
+      },
+      "reward_maj": {
+        "difference": 0.02223382629308617,
+        "prompt_bootstrap_95_interval": [
+          -0.015863301309036616,
+          0.060384137895271105
+        ]
+      },
+      "eos": {
+        "difference": 0.05859375,
+        "prompt_bootstrap_95_interval": [
+          -0.01171875,
+          0.12890625
+        ]
+      }
+    },
+    "late_window_regular_snapshots450_800": {
+      "generation_length": {
+        "difference": 0.55615234375,
+        "prompt_bootstrap_95_interval": [
+          -2.74483642578125,
+          4.03809814453125
+        ]
+      },
+      "conciseness": {
+        "difference": -0.002338409423828125,
+        "prompt_bootstrap_95_interval": [
+          -0.015823984146118165,
+          0.010332536697387689
+        ]
+      },
+      "sentiment": {
+        "difference": 0.0075331339705826394,
+        "prompt_bootstrap_95_interval": [
+          -0.0070239741127466,
+          0.021874784866497517
+        ]
+      },
+      "reward_min": {
+        "difference": -0.00036410074494597276,
+        "prompt_bootstrap_95_interval": [
+          -0.011516060736595368,
+          0.010075229630463124
+        ]
+      },
+      "reward_maj": {
+        "difference": 0.005558825291700485,
+        "prompt_bootstrap_95_interval": [
+          -0.006518840748958612,
+          0.01706730072632581
+        ]
+      },
+      "eos": {
+        "difference": -0.0068359375,
+        "prompt_bootstrap_95_interval": [
+          -0.03173828125,
+          0.01611328125
+        ]
+      }
+    },
+    "last_five_regular_snapshots600_800": {
+      "generation_length": {
+        "difference": -0.315625,
+        "prompt_bootstrap_95_interval": [
+          -4.990019531250001,
+          4.157402343749995
+        ]
+      },
+      "conciseness": {
+        "difference": 0.001654052734375001,
+        "prompt_bootstrap_95_interval": [
+          -0.015135498046875,
+          0.019011383056640598
+        ]
+      },
+      "sentiment": {
+        "difference": 0.0012147632874984979,
+        "prompt_bootstrap_95_interval": [
+          -0.0175637208912849,
+          0.019899001818212123
+        ]
+      },
+      "reward_min": {
+        "difference": 0.0015661948449996986,
+        "prompt_bootstrap_95_interval": [
+          -0.01244216232038707,
+          0.015990034707110672
+        ]
+      },
+      "reward_maj": {
+        "difference": 0.001302621176873801,
+        "prompt_bootstrap_95_interval": [
+          -0.013953091849740305,
+          0.01662491912820405
+        ]
+      },
+      "eos": {
+        "difference": 4.336808689942018e-19,
+        "prompt_bootstrap_95_interval": [
+          -0.03203125,
+          0.031269531249999725
+        ]
+      }
+    },
+    "early_window_regular_snapshots50_400": {
+      "generation_length": {
+        "difference": 1.6767578125,
+        "prompt_bootstrap_95_interval": [
+          -2.084619140625,
+          5.378039550781241
+        ]
+      },
+      "conciseness": {
+        "difference": -0.0059375762939453125,
+        "prompt_bootstrap_95_interval": [
+          -0.019910812377929688,
+          0.008133840560913073
+        ]
+      },
+      "sentiment": {
+        "difference": 0.005471479801144596,
+        "prompt_bootstrap_95_interval": [
+          -0.01104777775489083,
+          0.021875506457337195
+        ]
+      },
+      "reward_min": {
+        "difference": -0.003655765074927331,
+        "prompt_bootstrap_95_interval": [
+          -0.015204271433694887,
+          0.00843962151296295
+        ]
+      },
+      "reward_maj": {
+        "difference": 0.003189668582126612,
+        "prompt_bootstrap_95_interval": [
+          -0.010273566023370224,
+          0.016823519298313834
+        ]
+      },
+      "eos": {
+        "difference": -0.0205078125,
+        "prompt_bootstrap_95_interval": [
+          -0.0439453125,
+          0.0029296875
+        ]
+      }
+    }
+  },
+  "within_arm_800_minus400": {
+    "Early": {
+      "generation_length": {
+        "difference": -1.94140625,
+        "prompt_bootstrap_95_interval": [
+          -13.2462890625,
+          9.34375
+        ]
+      },
+      "conciseness": {
+        "difference": 0.0094451904296875,
+        "prompt_bootstrap_95_interval": [
+          -0.032718658447265625,
+          0.051788330078125
+        ]
+      },
+      "sentiment": {
+        "difference": 0.0279466798165231,
+        "prompt_bootstrap_95_interval": [
+          -0.020836014666383563,
+          0.07923249729619782
+        ]
+      },
+      "reward_min": {
+        "difference": 0.013145488307054622,
+        "prompt_bootstrap_95_interval": [
+          -0.02209017709339605,
+          0.0486360788134516
+        ]
+      },
+      "reward_maj": {
+        "difference": 0.024246381939155986,
+        "prompt_bootstrap_95_interval": [
+          -0.01598450335128291,
+          0.0669689834758173
+        ]
+      },
+      "eos": {
+        "difference": 0.01953125,
+        "prompt_bootstrap_95_interval": [
+          -0.0546875,
+          0.09375
+        ]
+      }
+    },
+    "Late": {
+      "generation_length": {
+        "difference": 5.328125,
+        "prompt_bootstrap_95_interval": [
+          -4.95703125,
+          16.01640624999999
+        ]
+      },
+      "conciseness": {
+        "difference": -0.02081298828125,
+        "prompt_bootstrap_95_interval": [
+          -0.062103271484375,
+          0.018922424316406228
+        ]
+      },
+      "sentiment": {
+        "difference": 0.0342717646908568,
+        "prompt_bootstrap_95_interval": [
+          -0.01772359860387951,
+          0.0875598556945988
+        ]
+      },
+      "reward_min": {
+        "difference": -0.00979603768682864,
+        "prompt_bootstrap_95_interval": [
+          -0.04515000079727543,
+          0.02452118877728023
+        ]
+      },
+      "reward_maj": {
+        "difference": 0.023254814096435428,
+        "prompt_bootstrap_95_interval": [
+          -0.01868766094965395,
+          0.06642129013853257
+        ]
+      },
+      "eos": {
+        "difference": -0.04296875,
+        "prompt_bootstrap_95_interval": [
+          -0.11328125,
+          0.0234375
+        ]
+      }
+    }
+  }
+}

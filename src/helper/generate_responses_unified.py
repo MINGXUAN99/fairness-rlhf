@@ -447,8 +447,8 @@ def main():
     if accelerator.is_main_process:
         print(f"\nPushing results to {output_hub_id}...")
         # HF_EVAL_PRIVATE=0 pushes public (needed when the private storage quota
-        # is full). Defaults to private to preserve prior behavior.
-        _eval_private = os.environ.get("HF_EVAL_PRIVATE", "1") != "0"
+        # is full). Defaults to public; set the variable to 1 to request private uploads.
+        _eval_private = os.environ.get("HF_EVAL_PRIVATE", "0") != "0"
         Dataset.from_dict(generation_dataset).push_to_hub(
             output_hub_id,
             private=_eval_private,

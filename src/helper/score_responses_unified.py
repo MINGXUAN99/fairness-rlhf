@@ -458,8 +458,8 @@ def main():
             dataset = dataset.add_column("conciseness_z", conc_z)
         
         # Push to hub. HF_EVAL_PRIVATE=0 pushes public (needed when the private
-        # storage quota is full). Defaults to private to preserve prior behavior.
-        dataset.push_to_hub(dataset_name, private=(os.environ.get("HF_EVAL_PRIVATE", "1") != "0"))
+        # storage quota is full). Defaults to public; set the variable to 1 to request private uploads.
+        dataset.push_to_hub(dataset_name, private=(os.environ.get("HF_EVAL_PRIVATE", "0") != "0"))
         if args.mode == "evaluation" and accelerator.is_main_process:
             sync_dataset_card_readme(dataset, dataset_name)
         print(f"✅ Successfully pushed scores to {dataset_name}")

@@ -18,9 +18,12 @@ logs/
 calibration/
 images/
 results/
-scripts/
-tests/
+scripts/*
+!scripts/train_windowed_pcgrad.sh
+tests/*
+!tests/test_windowed_experiment.py
 local_models/
+runs/
 *.log
 
 # Model weights (if saved locally)

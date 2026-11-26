@@ -7,6 +7,11 @@ import torch
 import argparse
 import importlib
 import json
+import atexit
+import math
+from src.imdb.ppo_training.windowed_monitor import WindowedMonitor
+
+_windowed_monitor = None
 from torch import nn
 from datasets import load_dataset
 from accelerate import Accelerator
@@ -139,11 +144,23 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
     try:
         source = inspect.getsource(_experimental_ppo_module.PPOTrainer.train)
     except (TypeError, OSError):
-        return
+        raise RuntimeError("Cannot inspect TRL PPO source")
+
+    def replace_once(source, old, new):
+        if source.count(old) != 1:
+            raise RuntimeError(f"TRL PPO patch mismatch: expected exactly one {old[:100]!r}")
+        return source.replace(old, new, 1)
+
+    # Accept TRL versions with or without the standard clipping line; the
+    # custom multi-gradient optimizer step retains its established behavior.
+    clip_line = '                            accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)\n'
+    if clip_line in source:
+        source = replace_once(source, clip_line, '')
 
     # Inject helpers into TRL's module namespace so the patched train body
     # can call them without an explicit import.
     gd = _experimental_ppo_module.__dict__
+    gd["_windowed_capture"] = _windowed_capture
     gd["_pcgrad_state"]            = _pcgrad_state
     gd["_pcgrad_window"]           = _pcgrad_window
     gd["pcgrad_project_2"]         = pcgrad_project_2
@@ -162,12 +179,10 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
             "                kl_mean_per_seq = kl.sum(1) / sequence_lengths_p1.clamp(min=1)\n"
             "                non_score_reward = -args.kl_coef * kl_mean_per_seq.unsqueeze(1).expand_as(kl)"
         )
-        if old_kl in source:
-            source = source.replace(old_kl, new_kl, 1)
-            source = source.replace(
+        source = replace_once(source, old_kl, new_kl)
+        source = replace_once(source,
                 "mean_kl = kl.sum(1).mean()",
                 "mean_kl = kl_mean_per_seq.mean()",
-                1,
             )
 
     # ── Change 1: reset side channel before the rollout block ─────────────
@@ -177,6 +192,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
     )
     new_c1 = (
         '            # PCGrad: reset per-group reward accumulators for this rollout\n'
+        '            _pcgrad_state["raw_rewards"] = []\n'
         '            _pcgrad_state["scores_r1_list"] = []\n'
         '            _pcgrad_state["scores_r2_list"] = []\n'
         '            # Windowed PCGrad: expose the 1-indexed PPO update (== global_step)\n'
@@ -185,8 +201,8 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                queries = data["input_ids"].to(device)'
     )
     if old_c1 not in source:
-        return  # TRL version mismatch – skip rather than corrupt training
-    source = source.replace(old_c1, new_c1, 1)
+        raise RuntimeError("TRL PPO rollout-start patch mismatch")
+    source = replace_once(source, old_c1, new_c1)
 
     # ── Change 2: concatenate per-group rewards after the rollout loop ─────
     old_c2 = (
@@ -200,7 +216,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                _pcgrad_state["scores_r2"] = torch.cat(_pcgrad_state["scores_r2_list"], 0)\n'
         '                values = torch.cat(values, 0)'
     )
-    source = source.replace(old_c2, new_c2, 1)
+    source = replace_once(source, old_c2, new_c2)
 
     # ── Change 3: compute per-group advantages after the combined ones ─────
     old_c3 = (
@@ -223,7 +239,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                    actual_start, actual_end, gen_length, args)\n'
         '                empty_cache()'
     )
-    source = source.replace(old_c3, new_c3, 1)
+    source = replace_once(source, old_c3, new_c3)
 
     # ── Change 4a: slice per-group mini-batch advantages ───────────────────
     old_c4a = '                            mb_advantage = advantages[micro_batch_inds]'
@@ -233,7 +249,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                            mb_advantage_r1 = advantages_r1[micro_batch_inds]\n'
         '                            mb_advantage_r2 = advantages_r2[micro_batch_inds]'
     )
-    source = source.replace(old_c4a, new_c4a, 1)
+    source = replace_once(source, old_c4a, new_c4a)
 
     # ── Change 4b: replace single backward+step with PCGrad update ─────────
     old_c4b = (
@@ -256,7 +272,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                                model, accelerator, optimizer,\n'
         '                                pg_loss_kl, pg_loss_r1, pg_loss_r2, vf_loss, args)'
     )
-    source = source.replace(old_c4b, new_c4b, 1)
+    source = replace_once(source, old_c4b, new_c4b)
 
     # ── Change 5: update the mini-batch del block ──────────────────────────
     # Remove `loss` (no longer created); add PCGrad-specific variables.
@@ -278,7 +294,7 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                        mb_values, mb_responses, mb_query_responses, mb_logprobs, _mb_mask,\n'
         '                    )'
     )
-    source = source.replace(old_del_mb, new_del_mb, 1)
+    source = replace_once(source, old_del_mb, new_del_mb)
 
     # ── Change 6: update the outer del block to include new advantage tensors
     # (entries are indented 16 spaces in TRL's source, not 20).
@@ -289,7 +305,12 @@ def _patch_ppo_for_pcgrad(apply_mean_kl: bool = True, apply_fn=None) -> None:
         '                scores_r1, scores_r2,\n'
         '                returns,'
     )
-    source = source.replace(old_del_outer, new_del_outer, 1)
+    source = replace_once(source, old_del_outer, new_del_outer)
+
+    source = replace_once(source,
+        '            # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch',
+        '            _windowed_capture(update, queries, postprocessed_responses, kl)\n'
+        '            # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch')
 
     # Compile and install
     source = textwrap.dedent(source)
@@ -534,43 +555,49 @@ _sumgrad_diag: dict = {
 }
 
 
-def _sumgrad_record_cosine(g1: torch.Tensor, g2: torch.Tensor) -> None:
-    """Record cos(g1, g2) + norms/dot for one update; buffered, flushed in chunks.
-
-    Also records the current PPO update index (_pcgrad_state["update"]) so that,
-    for windowed-PCGrad runs, each row can be labelled inside/outside the
-    projection window in post-hoc analysis (step is a per-minibatch counter,
-    whereas update is the 1-indexed PPO step matching the paper's figures).
-    """
+def _sumgrad_record_cosine(g1: torch.Tensor, g2: torch.Tensor, window_active=None) -> None:
     if _sumgrad_diag["csv_path"] is None:
         return
-    n1 = g1.norm()
-    n2 = g2.norm()
-    dot = torch.dot(g1, g2)
-    cos = (dot / (n1 * n2).clamp(min=1e-12)).item()
+    g1, g2 = g1.float(), g2.float()
+    n1, n2, dot = g1.norm().item(), g2.norm().item(), torch.dot(g1, g2).item()
+    valid = n1 > 1e-12 and n2 > 1e-12
+    if not all(math.isfinite(x) for x in (n1, n2, dot)):
+        raise FloatingPointError("Nonfinite reward gradients")
+    conflict = dot < 0
     _sumgrad_diag["buffer"].append(
         (_sumgrad_diag["step"], _pcgrad_state.get("update", 0),
-         cos, dot.item(), n1.item(), n2.item())
-    )
+         dot / (n1 * n2) if valid else None, dot, n1, n2,
+         window_active, conflict,
+         bool(window_active and conflict) if window_active is not None else None, valid))
     _sumgrad_diag["step"] += 1
     if len(_sumgrad_diag["buffer"]) >= 50:
         _sumgrad_flush_cosine()
 
 
 def _sumgrad_flush_cosine() -> None:
-    """Append buffered cosine rows to the CSV (writes header on first flush)."""
     path = _sumgrad_diag["csv_path"]
     if not path or not _sumgrad_diag["buffer"]:
         return
-    import csv as _csv
+    import csv
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    write_header = (not os.path.exists(path)) or os.path.getsize(path) == 0
+    write_header = not os.path.exists(path) or os.path.getsize(path) == 0
     with open(path, "a", newline="") as fh:
-        w = _csv.writer(fh)
+        writer = csv.writer(fh)
         if write_header:
-            w.writerow(["step", "update", "cos_g1_g2", "dot", "norm_g1", "norm_g2"])
-        w.writerows(_sumgrad_diag["buffer"])
+            writer.writerow(["step", "update", "cos_g1_g2", "dot", "norm_g1", "norm_g2",
+                             "window_active", "conflict_detected", "projection_applied", "valid_cosine"])
+        writer.writerows(_sumgrad_diag["buffer"])
     _sumgrad_diag["buffer"].clear()
+
+
+atexit.register(_sumgrad_flush_cosine)
+
+
+def _windowed_capture(update, queries, responses, kl):
+    if _windowed_monitor is not None:
+        _windowed_monitor.capture(update, queries, responses,
+            torch.cat(_pcgrad_state["raw_rewards"]),
+            torch.stack((_pcgrad_state["scores_r1"], _pcgrad_state["scores_r2"]), dim=1), kl)
 
 
 def load_reward_normalization_json(path: str, reward_model_hub_id_or_ids) -> None:
@@ -669,6 +696,7 @@ def pcgrad_project_2(
     *original* (pre-projection) other gradient, matching Algorithm 1 of the
     paper.  When dot >= 0 neither gradient is modified.
     """
+    g1, g2 = g1.float(), g2.float()
     g1_proj = g1.clone()
     g2_proj = g2.clone()
     dot = torch.dot(g1, g2)
@@ -1112,15 +1140,14 @@ def _windowed_pcgrad_compute_and_apply(
     accelerator.backward(pg_loss_r2, retain_graph=True)
     g2_flat = _flat_policy_grads()
 
-    # Record minority/majority gradient cosine (conflict measure) before combining.
-    if accelerator.is_main_process:
-        _sumgrad_record_cosine(g1_flat, g2_flat)
-
     # ── window decision: surgery ON only inside [start, end] ─────────────
     update = _pcgrad_state.get("update", 0)
     start = _pcgrad_window["start"]
     end = _pcgrad_window["end"]
     in_window = (start is None or update >= start) and (end is None or update <= end)
+
+    if accelerator.is_main_process:
+        _sumgrad_record_cosine(g1_flat, g2_flat, window_active=in_window)
 
     if in_window:
         # Gradient surgery ON — PCGrad conflict projection.
@@ -1771,6 +1798,8 @@ def get_pcgrad_reward(
         batch_idx = torch.arange(reward_logits.size(0), device=reward_logits.device)
         all_group_rewards = reward_logits[batch_idx, sequence_lengths]  # (batch, 2)
 
+        if _windowed_monitor is not None:
+            _pcgrad_state["raw_rewards"].append(all_group_rewards.detach().clone())
         all_group_rewards = _apply_reward_normalization_maxmin(all_group_rewards)
 
         scores_r1 = all_group_rewards[:, 0]  # minority
@@ -2153,6 +2182,14 @@ def tokenize(examples, tokenizer):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Unified PPO Training with configurable policy optimization method.")
+    parser.add_argument("--experiment_dir", help="New local artifact directory; enables minimal monitoring")
+    parser.add_argument("--experiment_inputs", help="Frozen inputs directory from windowed_experiment.py prepare")
+    parser.add_argument("--expected_updates", type=int, default=800)
+    parser.add_argument("--training_response_length", type=int, default=53,
+                        help="PPO rollout generation cap in experiment mode; separate from reward checkpoint naming")
+    parser.add_argument("--experiment_batch_size", type=int, default=64,
+                        help="Resolved single-GPU rollout batch for monitored experiments (minimum 8)")
+    parser.add_argument("--scoring_text", choices=["full", "continuation"], default="full")
     parser.add_argument("--method", type=str, required=True,
                         choices=["sharedrep", "maxmin", "gold", "gold_vanilla", "vanilla", "pcgrad", "sumgrad", "mgda"],
                         help="Policy optimization method: 'sharedrep', 'maxmin', 'gold', 'gold_vanilla', 'vanilla', "
@@ -2202,6 +2239,10 @@ def parse_args():
                         help="Base model for the value head. Defaults to --policy_model_name. "
                              "Tip: with a large LoRA policy (e.g. Qwen3-4B) set a smaller SAME-tokenizer model "
                              "(e.g. Qwen/Qwen3-0.6B-Base) so the full-fine-tuned value model is cheap.")
+    parser.add_argument("--model_parameter_dtype", choices=["float32", "bfloat16"], default="float32",
+                        help="Stored policy, value, reference and unquantized reward parameter dtype. "
+                             "Default float32 allows small Adam updates to accumulate; PPO still uses "
+                             "BF16 mixed-precision computation. bfloat16 is an explicit memory-saving override.")
     parser.add_argument("--policy_hub_id", type=str, default=None,
                         help="Override policy hub ID for saving. If omitted, derived from method/user_id/seed/proportion/alpha.")
     parser.add_argument("--gradient_checkpointing", action="store_true",
@@ -2374,6 +2415,7 @@ def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_n
     applied to the (frozen) reward backbone so a 4B RM can be loaded in bf16 or NF4 4-bit.
     """
     rm_load_kwargs = dict(rm_load_kwargs or {})
+    experiment_revisions = rm_load_kwargs.pop("experiment_revisions", {})
     if method == "sharedrep":
         if proportion is None or k is None:
             raise ValueError("--proportion and --k are required for sharedrep method")
@@ -2397,17 +2439,17 @@ def load_reward_model(method, user_id, seed, proportion, k, alpha, device, max_n
         
         # Naming aligned with train_reward_models / normalize_reward_model (ALPHA-len, no seed in hub id)
         reward_model_name_majority = maxmin_majority_rm_hub_id or f"{user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-majority-gpt2"
-        reward_model_majority = AutoModelForSequenceClassification.from_pretrained(reward_model_name_majority, **rm_load_kwargs)
+        reward_model_majority = AutoModelForSequenceClassification.from_pretrained(reward_model_name_majority, revision=experiment_revisions.get(reward_model_name_majority), **rm_load_kwargs)
         reward_model_majority.eval()
         fc_maj = reward_model_majority.score
         del reward_model_majority
 
         reward_model_name_minority = maxmin_minority_rm_hub_id or f"{user_id}/maxmin-imdb-reward-ALPHA{alpha}-len{max_new_tokens}-minority-gpt2"
-        reward_model = AutoModelForSequenceClassification.from_pretrained(reward_model_name_minority, **rm_load_kwargs)
+        reward_model = AutoModelForSequenceClassification.from_pretrained(reward_model_name_minority, revision=experiment_revisions.get(reward_model_name_minority), **rm_load_kwargs)
         reward_model.eval()
         fc_min = reward_model.score
 
-        reward_tokenizer = AutoTokenizer.from_pretrained(reward_model_name_majority)
+        reward_tokenizer = AutoTokenizer.from_pretrained(reward_model_name_majority, revision=experiment_revisions.get(reward_model_name_majority))
         configure_tokenizer(reward_tokenizer)
         reward_model.config.pad_token_id = reward_tokenizer.pad_token_id
 
@@ -2544,6 +2586,45 @@ if __name__ == "__main__":
     device = accelerator.device
 
     args = parse_args()
+    experiment_inputs = None
+    if args.experiment_dir:
+        from pathlib import Path
+        from transformers import set_seed
+        if args.method != "pcgrad" or args.pcgrad_window_start is None or args.pcgrad_window_end is None:
+            raise ValueError("Experiment monitoring requires bounded windowed PCGrad")
+        if accelerator.num_processes != 1 or not args.no_push or args.policy_model_name != "gpt2":
+            raise ValueError("This experiment requires one GPU, GPT-2 and --no_push")
+        if args.use_lora or args.load_in_4bit_frozen:
+            raise ValueError("This experiment requires full-precision backbone loading and no LoRA")
+        if not args.experiment_inputs or args.expected_updates < 1:
+            raise ValueError("Provide frozen --experiment_inputs and positive --expected_updates")
+        if Path(args.experiment_dir).exists():
+            raise FileExistsError(args.experiment_dir)
+        experiment_inputs = json.loads((Path(args.experiment_inputs) / "inputs.json").read_text())
+        if args.seed != experiment_inputs["seed"] or args.scoring_text != experiment_inputs["scoring_text"]:
+            raise ValueError("Seed/scoring convention differs from frozen inputs")
+        if not 1 <= args.pcgrad_window_start <= args.pcgrad_window_end <= args.expected_updates:
+            raise ValueError("Window must lie within the experiment horizon")
+        if args.value_model_name not in (None, "gpt2"):
+            raise ValueError("The experiment fixes the value backbone to GPT-2")
+        if args.alpha != .8 or args.proportion != .2:
+            raise ValueError("The experiment fixes alpha=.8 and proportion=.2")
+        import importlib.metadata
+        for package, version in experiment_inputs["versions"].items():
+            if importlib.metadata.version(package) != version:
+                raise ValueError(f"{package} differs from the frozen input environment")
+        import signal
+        def interrupted(signum, frame):
+            raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, interrupted)
+        if args.training_response_length < 1:
+            raise ValueError("training_response_length must be positive")
+        if args.experiment_batch_size < 8:
+            raise ValueError("Reward whitening requires experiment_batch_size >= 8")
+        set_seed(args.seed)  # also fixes value-head initialization before Trainer construction
+        args.maxmin_minority_rm_hub_id = experiment_inputs["models"]["minority"]["id"]
+        args.maxmin_majority_rm_hub_id = experiment_inputs["models"]["majority"]["id"]
+        args.sumgrad_cosine_csv = str(Path(args.experiment_dir) / "diagnostics/gradient_steps.csv")
 
     # Apply TRL training-loop patches.
     # PCGrad and SumGrad share the same multi-gradient patch (includes optional
@@ -2664,13 +2745,22 @@ if __name__ == "__main__":
     # Dataset
     batch_size = 16
     dataset_name = f"stanfordnlp/imdb"
-    dataset = load_dataset(dataset_name, split="train")
+    dataset = load_dataset(dataset_name, split="train") if not experiment_inputs else None
 
-    # Reward-model load kwargs: bf16 by default; optional NF4 4-bit for the frozen RM.
-    rm_load_kwargs = {"torch_dtype": torch.bfloat16, "trust_remote_code": True}
+    # Parameter storage is distinct from PPO's BF16 autocast. FP32 storage
+    # avoids rounding away small optimizer steps in full fine-tuning.
+    parameter_dtype = getattr(torch, args.model_parameter_dtype)
+    if accelerator.is_main_process:
+        print(f"Model parameter storage: {args.model_parameter_dtype}; PPO mixed precision: bf16")
+    # Optional NF4 quantization still overrides frozen model weight storage.
+    rm_load_kwargs = {"torch_dtype": parameter_dtype, "trust_remote_code": True}
     _bnb = maybe_bnb_config(args.load_in_4bit_frozen)
     if _bnb is not None:
         rm_load_kwargs["quantization_config"] = _bnb
+
+    if experiment_inputs:
+        rm_load_kwargs["experiment_revisions"] = {
+            v["id"]: v["revision"] for v in experiment_inputs["models"].values()}
 
     # Load reward model based on method (returns hub_id_or_ids for normalization lookup)
     reward_model, reward_tokenizer, reward_model_hub_id_or_ids = load_reward_model(
@@ -2714,12 +2804,14 @@ if __name__ == "__main__":
         _we = _pcgrad_window["end"] if _pcgrad_window["end"] is not None else "end"
         _tag = "deconflict-win" if _vanilla_deconflict else "win"
         policy_hub_id = f"{policy_hub_id}-{_tag}{_ws}_{_we}"
-    policy_tokenizer = AutoTokenizer.from_pretrained(policy_model_name, padding_side="left")
+    model_revision = experiment_inputs["models"]["policy"]["revision"] if experiment_inputs else None
+    policy_tokenizer = AutoTokenizer.from_pretrained(policy_model_name, revision=model_revision, padding_side="left")
     configure_tokenizer(policy_tokenizer, padding_side="left")
 
-    # Policy model (bf16). Under LoRA the base weights stay frozen; only adapters train.
+    # FP32 by default; BF16 computation is configured separately in PPOConfig.
+    # Under LoRA the base weights stay frozen; only adapters train.
     policy = AutoModelForCausalLM.from_pretrained(
-        policy_model_name, trust_remote_code=True, torch_dtype=torch.bfloat16
+        policy_model_name, revision=model_revision, trust_remote_code=True, torch_dtype=parameter_dtype
     )
     policy.config.pad_token_id = policy_tokenizer.pad_token_id
 
@@ -2741,39 +2833,57 @@ if __name__ == "__main__":
         ref_policy = None
     else:
         # Full fine-tuning: explicit frozen reference copy (optionally 4-bit).
-        ref_kwargs = {"trust_remote_code": True, "torch_dtype": torch.bfloat16}
+        ref_kwargs = {"trust_remote_code": True, "torch_dtype": parameter_dtype}
         _bnb_ref = maybe_bnb_config(args.load_in_4bit_frozen)
         if _bnb_ref is not None:
             ref_kwargs["quantization_config"] = _bnb_ref
-        ref_policy = AutoModelForCausalLM.from_pretrained(policy_model_name, **ref_kwargs)
+        ref_policy = AutoModelForCausalLM.from_pretrained(policy_model_name, revision=model_revision, **ref_kwargs)
 
-    # Value model (bf16, full fine-tuning — keep on a small backbone for large policies).
+    # Value parameters also need FP32 storage for small Adam updates to accumulate.
     value_model = AutoModelForSequenceClassification.from_pretrained(
-        value_model_name, trust_remote_code=True, num_labels=1, torch_dtype=torch.bfloat16
+        value_model_name, revision=model_revision, trust_remote_code=True, num_labels=1, torch_dtype=parameter_dtype
     )
     value_model.config.pad_token_id = policy_tokenizer.pad_token_id
+    if parameter_dtype == torch.float32:
+        for name, model in (("policy", policy), ("value", value_model)):
+            if any(p.dtype != torch.float32 for p in model.parameters() if p.requires_grad):
+                raise ValueError(f"{name} trainable parameters must remain FP32 for FP32 storage")
     # Gradient checkpointing itself is enabled by PPOConfig(gradient_checkpointing=...)
     # inside TRL; the enable_input_require_grads() call above is what makes it work
     # with a frozen (LoRA) embedding table.
 
-    with accelerator.main_process_first():
+    if experiment_inputs:
+        from datasets import Dataset
+        from src.imdb.ppo_training.windowed_monitor import read_jsonl, digest
+        train_rows = read_jsonl(Path(args.experiment_inputs) / "training.jsonl")
+        eval_rows = read_jsonl(Path(args.experiment_inputs) / "evaluation.jsonl")
+        if digest(train_rows) != experiment_inputs["training_hash"] or digest(eval_rows) != experiment_inputs["evaluation_hash"]:
+            raise ValueError("Frozen prompt manifest was modified")
+        if {r["prompt_id"] for r in train_rows} & {r["prompt_id"] for r in eval_rows}:
+            raise ValueError("Training/evaluation prompt overlap")
+        def as_dataset(rows):
+            return Dataset.from_list([{"input_ids": r["input_ids"],
+                                       "attention_mask": [1] * len(r["input_ids"])} for r in rows])
+        train_dataset, eval_dataset = as_dataset(train_rows), as_dataset(eval_rows)
+    else:
+        with accelerator.main_process_first():
 
-        min_review_length = 200
-        input_min_text_length = 2
-        input_max_text_length = 8
+            min_review_length = 200
+            input_min_text_length = 2
+            input_max_text_length = 8
         
-        dataset = pre_processing_imdb(
-            dataset,
-            model_name=policy_model_name,
-            min_review_length=min_review_length,
-            input_min_text_length=input_min_text_length,
-            input_max_text_length=input_max_text_length
-        )
-        dataset = dataset.map(lambda x: tokenize(x, policy_tokenizer), batched=True, batch_size=batch_size, num_proc=32, desc="Tokenizing")
-        dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
-        dataset = dataset.train_test_split(test_size=0.05, seed=seed)
-        train_dataset = dataset["train"]
-        eval_dataset = dataset["test"]
+            dataset = pre_processing_imdb(
+                dataset,
+                model_name=policy_model_name,
+                min_review_length=min_review_length,
+                input_min_text_length=input_min_text_length,
+                input_max_text_length=input_max_text_length
+            )
+            dataset = dataset.map(lambda x: tokenize(x, policy_tokenizer), batched=True, batch_size=batch_size, num_proc=32, desc="Tokenizing")
+            dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
+            dataset = dataset.train_test_split(test_size=0.05, seed=seed)
+            train_dataset = dataset["train"]
+            eval_dataset = dataset["test"]
 
     # PCGrad/SumGrad and vanilla-deconflict require gradient_accumulation_steps=1
     # (multiple sequential backward passes + a custom step). Double the per-device
@@ -2782,16 +2892,20 @@ if __name__ == "__main__":
     _base_bs = args.per_device_train_batch_size if args.per_device_train_batch_size else 32
     grad_accum_steps = 1 if _needs_single_accum else 2
     pcgrad_batch_size = _base_bs * 2 if _needs_single_accum else _base_bs
+    if experiment_inputs:
+        pcgrad_batch_size = args.experiment_batch_size
 
     # HF repo privacy: HF_PRIVATE=0 pushes public (needed when the private
-    # storage quota is full). Defaults to private to preserve prior behavior.
-    _hf_private = os.environ.get("HF_PRIVATE", "1") != "0"
+    # storage quota is full). Defaults to public; set the variable to 1 to request private uploads.
+    _hf_private = os.environ.get("HF_PRIVATE", "0") != "0"
     if accelerator.is_main_process:
         print(f"HF push visibility: {'private' if _hf_private else 'public'}")
 
     # Training Arguments
     training_args = PPOConfig(
-        logging_steps=50,  # Reduced frequency to save time (was 10)
+        **(dict(seed=seed, response_length=args.training_response_length, num_sample_generations=0,
+                output_dir=str(Path(args.experiment_dir) / "trainer")) if experiment_inputs else {}),
+        logging_steps=1 if experiment_inputs else 50,
         num_train_epochs=3,  # Reduced from 5 to save time
         num_ppo_epochs=3,
         per_device_train_batch_size=pcgrad_batch_size,
@@ -2916,6 +3030,11 @@ if __name__ == "__main__":
     if diag_callback is not None:
         callbacks.append(diag_callback)
 
+    if experiment_inputs:
+        _windowed_monitor = WindowedMonitor(args.experiment_dir, args.experiment_inputs,
+                                             policy_tokenizer, args, _sumgrad_flush_cosine)
+        callbacks.append(_windowed_monitor)
+
     trainer = PPOTrainer(
         args=training_args,
         model=policy,
@@ -2927,7 +3046,52 @@ if __name__ == "__main__":
         eval_dataset=eval_dataset,
         callbacks=callbacks,
     )
-    trainer.train()
+    if _windowed_monitor is not None:
+        import importlib.metadata
+        import subprocess
+        _windowed_monitor.trainer = trainer
+        if training_args.num_total_batches != args.expected_updates or training_args.batch_size != args.experiment_batch_size:
+            raise ValueError(f"Expected {args.expected_updates} updates and batch {args.experiment_batch_size}; got "
+                             f"{training_args.num_total_batches}, {training_args.batch_size}")
+        if training_args.gradient_accumulation_steps != 1 or training_args.num_ppo_epochs != 3:
+            raise ValueError("Expected accumulation=1, PPO epochs=3")
+        import hashlib
+        source_paths = ["src/imdb/ppo_training/unified_ppo_training.py",
+                        "src/imdb/ppo_training/windowed_monitor.py",
+                        "src/helper/windowed_experiment.py", "scripts/train_windowed_pcgrad.sh"]
+        source_hashes = {name: hashlib.sha256((Path(ROOT) / name).read_bytes()).hexdigest()
+                         for name in source_paths}
+        manifest = dict(inputs=experiment_inputs, arguments=vars(args), source_hashes=source_hashes,
+                        model_parameter_dtypes={name: sorted({str(p.dtype) for p in model.parameters()})
+                                                if model is not None else None
+                                                for name, model in (("policy", policy), ("value", value_model),
+                                                                    ("reference", ref_policy), ("reward", reward_model))},
+                        resolved_config=training_args.to_dict(),
+                        evaluation_updates=_windowed_monitor.updates,
+                        evaluation_decoding=dict(max_new_tokens=256, temperature=.7, top_p=.95, top_k=0, batch_size=16),
+                        evaluation_rng="sha256([ordered batch prompt IDs, update]) first 8 hex digits; fixed batches of 16",
+                        training_decoding=dict(max_new_tokens=args.training_response_length,
+                                               temperature=training_args.temperature + 1e-7,
+                                               top_k=0, top_p=1, do_sample=True),
+                        generation_length_convention="continuation tokens through first EOS, including EOS",
+                        reward_normalization=_reward_normalization,
+                        code_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                        code_diff=subprocess.check_output(["git", "diff", "--stat"], cwd=ROOT, text=True),
+                        versions={name: importlib.metadata.version(name) for name in
+                                  ("torch", "transformers", "trl", "accelerate", "datasets")})
+        # PPOConfig can contain Hub tokens: remove credential fields before serialization.
+        manifest["resolved_config"] = {k: v for k, v in manifest["resolved_config"].items()
+                                       if "token" not in k or k in ("stop_token", "stop_token_id")}
+        (_windowed_monitor.root / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    try:
+        trainer.train()
+    finally:
+        _sumgrad_flush_cosine()
+    if _windowed_monitor is not None:
+        final_dir = _windowed_monitor.root / "final_policy"
+        trainer.accelerator.unwrap_model(trainer.model).policy.save_pretrained(final_dir)
+        policy_tokenizer.save_pretrained(final_dir)
+        (_windowed_monitor.root / "TRAINING_COMPLETE").write_text(str(trainer.state.global_step))
 
     # Flush any remaining SumGrad cosine-diagnostic rows.
     if accelerator.is_main_process and _sumgrad_diag["csv_path"]:
@@ -2936,7 +3100,10 @@ if __name__ == "__main__":
 
     # Save the model - explicitly save the policy model with its config and weights
     if accelerator.is_main_process and args.no_push:
-        print("\n--no_push set: skipping local save and Hub push (diagnostic run).")
+        if _windowed_monitor is not None:
+            print(f"Local final policy saved to {_windowed_monitor.root / 'final_policy'}; Hub push disabled.")
+        else:
+            print("\n--no_push set: skipping local save and Hub push (diagnostic run).")
 
     if accelerator.is_main_process and not args.no_push:
         print("\n" + "="*80)
