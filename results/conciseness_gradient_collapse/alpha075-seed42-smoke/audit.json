@@ -1,0 +1,25 @@
+{
+  "completed": {
+    "final_update": 2,
+    "final_panel_update": 2,
+    "manifest_sha256": "2e95c2ea7b5a627eea908881f589c8012271d0c01428abfc3054b9c9573ec7f3"
+  },
+  "training_rollouts": 16,
+  "training_eos": 5,
+  "updates": [
+    {
+      "ppo_update": 1,
+      "norm_update": 0.027283313184159712,
+      "mixture_error_relative": 8.04015021015243e-07,
+      "contribution_conciseness": -0.09677081441546553,
+      "contribution_sentiment": 0.000595129434184655
+    },
+    {
+      "ppo_update": 2,
+      "norm_update": 0.008114405377376543,
+      "mixture_error_relative": 9.19498897572734e-07,
+      "contribution_conciseness": 0.012973604776175662,
+      "contribution_sentiment": 0.0003628561561815989
+    }
+  ]
+}

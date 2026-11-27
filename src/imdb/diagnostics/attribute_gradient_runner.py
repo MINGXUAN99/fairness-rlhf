@@ -61,6 +61,9 @@ def load_config(path):
     if sampling.get("top_p", 1) != 1 or sampling.get("top_k", 0) != 0:
         raise ValueError("Clean panel requires unfiltered sampling (top_p=1, top_k=0)")
     diag = cfg["diagnostic"]
+    for key in ("gradient_accumulation_steps", "rollout_chunk_size"):
+        if key in cfg and (type(cfg[key]) is not int or cfg[key] < 1):
+            raise ValueError(f"{key} must be a positive integer")
     for key in ("batch_size", "blocks", "early_every", "late_every"):
         if not isinstance(diag.get(key), int) or diag[key] < 1:
             raise ValueError(f"diagnostic.{key} must be a positive integer")

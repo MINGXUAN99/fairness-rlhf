@@ -18,7 +18,7 @@
     "scorer_max_length": 512, "text_scope": "prompt_response", "clip_conciseness": true
   },
   "sampling": {
-    "max_new_tokens": 512, "max_prompt_tokens": 32, "responses_per_prompt": 4,
+    "max_new_tokens": 256, "max_prompt_tokens": 32, "responses_per_prompt": 4,
     "temperature": 1.0, "top_p": 1.0, "top_k": 0
   },
   "diagnostic": {

@@ -32,6 +32,8 @@ LOOP_FIXTURE = '''def train(self):
             context_length = 8
             query_responses = sample()
             scores = score(query_responses)
+            padding_mask, padding_mask_p1 = masks()
+            logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB)
             non_score_reward = -args.kl_coef * kl
             rewards = non_score_reward.clone()
             if args.whiten_rewards:
@@ -246,9 +248,56 @@ class GradientTests(unittest.TestCase):
             self.policy.logits.add_(torch.tensor([.1, -.2, .3]))
         torch.testing.assert_close(d.parameter_displacement(self.policy, before), torch.tensor([.1, -.2, .3]))
 
+    def test_rollout_record_retains_raw_logprobs_and_both_trainer_masks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            probe = AttributeTrainingProbe.__new__(AttributeTrainingProbe)
+            probe.policy, probe.output = self.policy, Path(temp)
+            probe.cfg = dict(run_id="test", seed=42, alpha=.75, save_all_rollouts=True,
+                             diagnostic=dict(shared_scale=1, early_every=25, early_until=300, late_every=100))
+            probe.tokenizer = SimpleNamespace(eos_token_id=2, pad_token_id=2)
+            probe.controls = {}
+            probe.scorers = SimpleNamespace(score=lambda samples, *_: samples)
+            trainer = SimpleNamespace(args=SimpleNamespace(response_length=4, num_total_batches=3),
+                                      state=SimpleNamespace(episode=1))
+            raw = torch.tensor([[-1., -2., -3., -4.]])
+            probe.capture_logprobs(raw, 1, 3)
+            probe.capture_rollout(trainer, dict(update=1, context_length=1, query_responses=torch.tensor([[9, 7, 2, 8, 6]]),
+                generation_config=SimpleNamespace(top_p=1, top_k=0, temperature=1), scores=torch.tensor([.5]),
+                padding_mask=torch.tensor([[False, True, True, True]]),
+                padding_mask_p1=torch.tensor([[False, False, True, True]])))
+            row = json.loads((Path(temp)/"rollouts.jsonl").read_text())
+            self.assertEqual((row["policy_length"], row["action_count"], row["response_tokens"]), (1, 2, [7, 2]))
+            self.assertEqual(row["rollout_response_tokens"], [7, 2, 8, 6])
+            self.assertEqual(row["rollout_logprobs"], raw.tolist()[0])
+            self.assertEqual(row["padding_mask"], [False, True, True, True])
+            self.assertEqual(row["padding_mask_p1"], [False, False, True, True])
+            probe.cfg["save_all_rollouts"] = False
+            probe.capture_logprobs(raw, 1, 3)
+            self.assertIsNone(probe.rollout_logprobs)
+            probe.capture_logprobs(raw, 3, 3)
+            self.assertIsNotNone(probe.rollout_logprobs)
+
 
 @unittest.skipUnless(HAS_TORCH and importlib.util.find_spec("transformers"), "Requires offline diagnostic dependencies")
 class OfflineRunnerTests(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("trl"), "Requires the PPO trainer")
+    def test_compact_rollouts_match_trl_sampled_tokens_and_logprobs(self):
+        from transformers import GenerationConfig, GPT2Config, GPT2LMHeadModel
+        from trl.experimental.ppo.ppo_trainer import batch_generation, selective_log_softmax
+        from .attribute_training_probe import _generate_rollout_logprobs
+
+        model = GPT2LMHeadModel(GPT2Config(n_layer=1, n_head=1, n_embd=8, vocab_size=12)).eval()
+        queries = torch.tensor([[0, 1], [3, 4], [1, 4]])
+        config = GenerationConfig(max_new_tokens=5, do_sample=True, pad_token_id=0, eos_token_id=2)
+        with torch.no_grad(), torch.random.fork_rng(devices=[]):
+            torch.manual_seed(42)
+            expected, scores = batch_generation(model, queries, 2, 0, config)
+            expected_logp = selective_log_softmax(scores, expected[:, queries.size(1):])
+            torch.manual_seed(42)
+            actual, logp = _generate_rollout_logprobs(model, queries, 2, 0, config)
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(logp, expected_logp)
+
     def test_tiny_local_checkpoints_end_to_end(self):
         from tokenizers import Tokenizer, models, pre_tokenizers
         from transformers import GPT2Config, GPT2LMHeadModel, GPT2ForSequenceClassification, PreTrainedTokenizerFast

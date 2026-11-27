@@ -6,7 +6,7 @@ Branch: `experiment/conciseness-gradient-collapse`.
 
 Parent: `naacl_rebuttal` at `398ac6a` (also the current local `main` commit when this branch was created).
 
-Status: diagnostics implemented; see the shorter [run guide and output-field list](run_attribute_diagnostics.md). No project training, GPU evaluation, or research results have been obtained. This plan addresses WFDb's third weakness in [the reviews](../review/review.md), especially why minority performance remains poor after gradient alignment becomes positive. It refines the temporal experiment proposed in [the rebuttal strategy](../review/rebuttal_strategy.md).
+Status: diagnostics implemented; see the shorter [run guide and output-field list](run_attribute_diagnostics.md). The alpha-0.75, seed-42 GPU smoke test passed two PPO updates and the metric audit. The 26-update rehearsal also passed its audit. Its [results summary](conciseness_gradient_collapse_rehearsal_results.md) reports the gradient and held-out reward measurements. This plan addresses WFDb's third weakness in [the reviews](../review/review.md), especially why minority performance remains poor after gradient alignment becomes positive. It refines the temporal experiment proposed in [the rebuttal strategy](../review/rebuttal_strategy.md).
 
 ## Measurement checklist: what we will collect
 
@@ -130,15 +130,38 @@ PPO also uses a clipped surrogate and repeated minibatch updates; its gradients 
 
 | Phase | Configuration | Purpose |
 |---|---|---|
-| Instrumentation pilot | Vanilla GPT-2, alpha 0.75, one existing/reproduced seed | Verify measurements and whether the proposed signature is present. |
-| Confirmation | Vanilla GPT-2, alpha 0.70, 0.75, 0.80; three matched seeds each | Compare a nearby noncollapsed setting with the two settings discussed in Figure 3. Nine runs if no reusable trajectories exist. |
+| First matched seed | Run vanilla GPT-2 at alpha 0.75 first, then 0.70 and 0.80 with the same seed (3 runs). | Use the 0.75 run as the instrumentation pilot and compare all three settings within one seed. |
+| Confirmation with additional seeds | After completing all three alphas, repeat the full alpha sweep for each of two additional matched seeds (6 more runs). | Check whether the pattern repeats across seeds. The full matrix contains 9 runs. |
 | Optional extension | One additional backbone at an already observed collapse setting | Broaden scope only after establishing the mechanism in GPT-2. |
 
 Start with available checkpoints and saved rollouts, but do not infer temporal behavior from final checkpoints alone. The current trainer sets `save_strategy="no"`; intermediate checkpoints must be explicitly saved or diagnostics collected during a rerun. Existing final artifacts do not imply that resumable intermediate states exist.
 
-Retain the baseline training configuration: population proportion, reward-model IDs/revisions, initialization, rollout sampler, token caps, PPO epochs, whitening, optimizer, KL, and learning-rate schedule. Validate exact model IDs before use; do not infer availability from a name template. No new reward-model training is required for the primary study.
+The smoke test and capacity rehearsal use a 512-token PPO rollout cap. Hold the full sweep until the rehearsal metrics have been reviewed. The [historical alpha-0.75, seed-43 training arguments](https://huggingface.co/mxcui/vanilla-imdb-ppo-prop0.2-alpha0.75-seed43-mean_kl0.1-gpt2/blob/8cbd6e2a0693d220cc329b4f75db7052d83337b9/training_args.bin) record a 53-token rollout cap, an effective batch of 64, and 50,000 episodes. Interpret the 512-token rehearsal as a longer-cap experiment. The prepared rebuttal configuration uses a 53-token PPO training cap and a 256-token cap for both independent evaluation panels. Launch remains on hold for review. Keep the historical reward-scoring denominator of 512 separate from this decision. Retain the baseline population proportion, reward models, initialization, sampling temperature, PPO epochs, whitening, optimizer, KL, and learning-rate schedule. Validate exact model IDs before use. No new reward-model training is required for the primary study.
 
-For a smaller rebuttal budget, complete alpha 0.75 across three seeds and a matched alpha 0.70 control before expanding to alpha 0.80. Describe limited replication honestly.
+For a smaller rebuttal budget, stop after the first three runs and report the alpha comparison as a single-seed result. If the pilot used a reduced panel or its measurements need correction, complete its diagnostics under the final protocol before counting it in the matched sweep.
+
+#### GPU validation before the first matched seed
+
+Use vanilla GPT-2 and seed 42 throughout the first sweep. Run one job at a time on the 12 GiB RTX 3080. Rounds 1 and 2 are short engineering trials at alpha 0.75. Give each a fresh run ID and output directory. Start each scientific run from the common baseline initialization.
+
+| Round | Training and measurements | Pass condition |
+|---|---|---|
+| 0. Preflight | Check a CUDA tensor operation in the training environment, run the CPU diagnostic tests, and validate the JSON. Verify access to pinned policy, tokenizer, pooled and alpha-matched minority reward models, sentiment scorer, and IMDb data. Configure a disjoint held-out panel and local outputs. | CUDA and tests pass, inputs load, and prompt IDs are unique within each panel and disjoint across panels. |
+| 1. Two-update smoke test | Use the real training path, a 512-token generation cap, four diagnostic prompts × four responses, four disjoint blocks, and a small held-out panel. Set the early diagnostic interval to 1 and retain every training rollout. Set total episodes to twice the resolved rollout batch size. | Observe two successive rollout updates with increasing episode counts. Both have finite losses, positive optimizer displacement and all expected records. The final local policy reloads and generates a response. |
+| 2. Schedule and capacity rehearsal | Run 26 updates with the intended production batch, cap, 128 × 4 panel, held-out panel, and normal diagnostic interval of 25. Set total episodes to 26 times the resolved rollout batch size. Record wall time for ordinary and diagnostic updates, peak GPU and host memory, and output size. | Training summaries and controls cover updates 1–26. Panel and held-out measurements occur at 0, 25 and 26. Actual-update records occur at 25 and 26. The final scheduled measurement and model save complete on this GPU. |
+| 3. First scientific sweep | Run alpha 0.75 to the baseline horizon, then 0.70 and 0.80 with the same seed, panels, schedule and training settings. Change the alpha-specific reward models as specified by each manifest. | Audit each run through its final update before launching the next. Compare the three trajectories only after all three pass. |
+
+Compute the episode budget from the trainer's effective rollout batch, including gradient accumulation. Verify the resolved update count on startup. If a diagnostic update exhausts memory, first reduce the diagnostic microbatch and repeat the failed rehearsal. Record any change to the PPO batch and repeat the capacity check before adopting it for all alphas.
+
+**Metric audit for each round with training.** Use the append-only JSONL records and verify the CSV export against them. Check unique keys by run, stream, phase, update and, where applicable, block, evaluation alpha or sample ID. Check the following before advancing.
+
+| Evidence | What to verify |
+|---|---|
+| Training progress | One training rollout summary and one training-controls row per update. Check episode counts, learning rate, KL, entropy, clipping fraction, policy/value losses and pre/post-whitening reward and advantage standard deviations. Require a positive finite displacement at measured optimizer steps. Reward improvement is a research outcome, not a smoke-test threshold. |
+| Rollouts and rewards | Check sampled tokens and EOS/cap flags against length summaries; compare scorer length before and after truncation. Check conciseness, sentiment, oracle minority, learned minority and training pooled reward summaries. Recompute reward covariance and within-prompt variances on the repeated-response panel. |
+| Gradient and update measurements | Check raw and weighted norms, dominance ratio, pairwise cosines and oracle-mixture reconstruction error. At each selected training update require one first-optimizer-step row with PPO ascent norm, update norm, cosines, signed products and alpha-weighted contributions. Check the weighted products against the raw products. Record the measured reconstruction error and freeze a precision-appropriate tolerance during rehearsal. |
+| Panels and controls | At each panel time require one aggregate gradient row plus four block rows, four counterfactual weights (0.5, 0.75, 0.9, 1.0), and held-out reward/length outcomes. Check panel counts and source IDs. Initialization has panel measurements only. Single-sample within-prompt variances and numerically undefined cosines or ratios may be null; explain each null from counts or norms. |
+| Completion and missing fields | Match manifest identifiers, final update, completion record, saved policy and analysis exports. Record any missing field with its stream, update and cause. For each retained training response, verify that rollout_response_tokens, rollout_logprobs, padding_mask and padding_mask_p1 have the full rollout width. Inspect an early EOS example alongside the canonical response tokens and length. Fix collection gaps before the scientific sweep. |
 
 ### 3.2 Time points and sampling
 
@@ -148,7 +171,7 @@ For a smaller rebuttal budget, complete alpha 0.75 across three seeds and a matc
 - Divide the panel into four prompt-disjoint blocks and retain block gradient estimates to assess Monte Carlo stability. Repeat generation at selected early and late checkpoints using independent sampling seeds. Do not treat blocks or rollouts as independent training runs.
 - Keep a separate, fixed held-out evaluation panel for reward and length trajectories. These are mechanistic diagnostics, not claims of reward-model holdout accuracy.
 
-Primary length statistics come from the **actual training rollouts**, not only freshly generated diagnostic responses. The existing diagnostic defaults to 200 tokens and temperature 0.7/top-p 0.95, whereas the training task uses a longer cap; copying those defaults could create the phenomenon being measured.
+Primary length statistics come from the **actual training rollouts**, not only freshly generated diagnostic responses. Report the actual training distribution (53-token cap for the planned run) separately from the newly generated panels (256-token cap). Both streams retain the same underlying scorer and length denominator.
 
 ### 3.3 Separate sampling distributions explicitly
 

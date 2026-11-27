@@ -21,6 +21,9 @@ def instrument_source(source):
     edits = [
         ("    for update in range(1, args.num_total_batches + 1):",
          "    self.attribute_probe.begin(self)\n    for update in range(1, args.num_total_batches + 1):"),
+        ("            logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB)",
+         "            self.attribute_probe.capture_logprobs(logprobs, update, args.num_total_batches)\n"
+         "            logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB)"),
         ("            if args.whiten_rewards:",
          "            self.attribute_probe.observe('rewards_pre_whiten', rewards, ~padding_mask_p1)\n            if args.whiten_rewards:"),
         ("            lastgaelam = 0",
@@ -46,23 +49,57 @@ def instrument_source(source):
     # Ensure variables used by capture still exist in this trainer version.
     tree = ast.parse(source)
     assigned = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-    required = {"query_responses", "context_length", "scores", "generation_config", "optimizer", "update", "metrics"}
+    required = {"query_responses", "context_length", "scores", "generation_config", "optimizer", "update",
+                "metrics", "padding_mask", "padding_mask_p1"}
     if not required <= assigned:
         raise RuntimeError(f"Unsupported PPO loop, missing locals: {required-assigned}")
     return source
 
 
-def install_hooks(ppo_module):
+def _generate_rollout_logprobs(model, queries, chunk_size, pad_token_id, generation_config):
+    """Reduce each TRL generation chunk before starting the next one."""
+    import math
+    import torch
+    from torch.nn.functional import pad
+    from trl.experimental.ppo.ppo_trainer import generate, selective_log_softmax
+
+    tokens, probabilities = [], []
+    for chunk in queries.split(chunk_size):
+        sequence, logits = generate(model, chunk, pad_token_id, generation_config)
+        tokens.append(sequence)
+        probabilities.append(selective_log_softmax(logits, sequence[:, queries.size(1):]))
+        # TRL pads missing score vectors with zeros (a uniform distribution).
+        uniform_logprob = -math.log(logits.size(-1))
+        del logits
+    width = max(t.size(1) for t in tokens)
+    padded_tokens = [pad(t, (0, width - t.size(1)), value=pad_token_id) for t in tokens]
+    padded_probs = [pad(p, (0, width - t.size(1)), value=uniform_logprob) for t, p in zip(tokens, probabilities)]
+    return torch.cat(padded_tokens), torch.cat(padded_probs)
+
+
+def install_hooks(ppo_module, *, compact_rollouts=False):
     original = ppo_module.PPOTrainer.train
     if getattr(original, "_attribute_probe", False):
         raise RuntimeError("Attribute hooks already installed")
     source = instrument_source(inspect.getsource(original))
+    if compact_rollouts:
+        replacements = {
+            "query_responses, logitss = batch_generation(": "query_responses, rollout_logp = _generate_rollout_logprobs(",
+            "logits = logitss[i : i + args.local_rollout_forward_batch_size]": "logprob = rollout_logp[i : i + args.local_rollout_forward_batch_size]",
+            "logprob = selective_log_softmax(logits, response)\n                del logits": "# Log probabilities were collected during generation.",
+        }
+        for old, new in replacements.items():
+            if source.count(old) != 1:
+                raise RuntimeError("Unsupported TRL rollout generation loop")
+            source = source.replace(old, new)
     filename = "<ppo_train_with_attribute_probe>"
     # Let the existing mean-KL patch inspect this function in its next pass.
     linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
     # Share the live module globals: setup_reward_function changes get_reward
     # AFTER hook installation and must remain visible to the patched loop.
     namespace = original.__globals__
+    if compact_rollouts:
+        namespace["_generate_rollout_logprobs"] = _generate_rollout_logprobs
     exec(compile(source, filename, "exec"), namespace)
     patched = namespace[original.__name__]
     patched._attribute_probe = True
@@ -116,6 +153,11 @@ class AttributeTrainingProbe:
         self.controls[f"{name}_std"] = float(values.std(unbiased=False)) if values.numel() else None
         self.controls[f"{name}_mean"] = float(values.mean()) if values.numel() else None
 
+    def capture_logprobs(self, logprobs, update, total_updates):
+        # PPO replaces masked entries with a sentinel immediately after this hook.
+        save = self.cfg.get("save_all_rollouts", False) or runner.due(update, self.cfg, final=update == total_updates)
+        self.rollout_logprobs = logprobs.detach().cpu() if save else None
+
     def capture_rollout(self, trainer, local):
         import torch
         self.update = int(local["update"])
@@ -146,8 +188,16 @@ class AttributeTrainingProbe:
                     generation_cap=trainer.args.response_length, source_review_ids_available=False)
         d.append_jsonl(self.output/"rollout_summary.jsonl", [dict(meta, **d.summarize_samples(rows), **self.controls)])
         selected = runner.due(self.update, self.cfg, final=self.update == trainer.args.num_total_batches)
-        if selected or self.cfg.get("save_all_rollouts", False):
+        if self.rollout_logprobs is not None:
+            policy_masks = local["padding_mask"].detach().cpu().tolist()
+            value_masks = local["padding_mask_p1"].detach().cpu().tolist()
+            for row, tokens, logprobs, policy_mask, value_mask in zip(
+                rows, qr, self.rollout_logprobs.tolist(), policy_masks, value_masks, strict=True
+            ):
+                row.update(rollout_response_tokens=tokens[context:], rollout_logprobs=logprobs,
+                           padding_mask=policy_mask, padding_mask_p1=value_mask)
             d.append_jsonl(self.output/"rollouts.jsonl", [dict(meta, **r) for r in rows])
+            self.rollout_logprobs = None
         if selected:
             vectors, metrics = runner.measure(self.policy, self.tokenizer, rows, self.cfg,
                                                baseline="batch_mean", temperature=self.temperature)

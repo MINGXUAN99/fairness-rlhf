@@ -2295,15 +2295,15 @@ if __name__ == "__main__":
         load_prompts(attribute_config["prompts_file"])
         if attribute_config["alpha"] != args.alpha or attribute_config["seed"] != args.seed:
             raise ValueError("Diagnostic config alpha/seed must match training alpha/seed")
-        if args.rollout_response_length != attribute_config["sampling"]["max_new_tokens"]:
-            raise ValueError("Set --rollout_response_length explicitly to the diagnostic max_new_tokens")
+        if args.rollout_response_length is None:
+            raise ValueError("Set --rollout_response_length explicitly for PPO training")
         if attribute_config["policy_tokenizer"]["path"] != args.policy_model_name:
             raise ValueError("Diagnostic policy_tokenizer.path must match --policy_model_name")
         if resolve_use_lora(args.use_lora, args.policy_model_name):
             raise ValueError("Initial attribute experiment supports full fine-tuning; disable LoRA")
         from transformers import set_seed
         set_seed(args.seed)
-        install_hooks(_experimental_ppo_module)
+        install_hooks(_experimental_ppo_module, compact_rollouts="rollout_chunk_size" in attribute_config)
 
     # Apply TRL training-loop patches.
     # PCGrad and SumGrad share the same multi-gradient patch (includes optional
@@ -2568,6 +2568,8 @@ if __name__ == "__main__":
     _needs_single_accum = method in ("pcgrad", "sumgrad", "mgda") or _vanilla_deconflict
     _base_bs = args.per_device_train_batch_size if args.per_device_train_batch_size else 32
     grad_accum_steps = 1 if _needs_single_accum else 2
+    if attribute_config:
+        grad_accum_steps = attribute_config.get("gradient_accumulation_steps", grad_accum_steps)
     pcgrad_batch_size = _base_bs * 2 if _needs_single_accum else _base_bs
     if experiment_inputs:
         pcgrad_batch_size = args.experiment_batch_size
@@ -2587,6 +2589,8 @@ if __name__ == "__main__":
         num_ppo_epochs=3,
         per_device_train_batch_size=pcgrad_batch_size,
         gradient_accumulation_steps=grad_accum_steps,  # PCGrad: 1 (batch doubled); else 2
+        **({"local_rollout_forward_batch_size": attribute_config["rollout_chunk_size"]}
+           if attribute_config and "rollout_chunk_size" in attribute_config else {}),
         bf16=True,
         learning_rate=args.learning_rate,
         eval_on_start=False,  # Disabled to save time - evaluation happens at end anyway

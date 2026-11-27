@@ -1,0 +1,54 @@
+{
+  "run_id": "alpha075-seed42-full",
+  "seed": 42,
+  "alpha": 0.75,
+  "device": "cuda",
+  "output_dir": "diagnostics",
+  "prompts_file": "panel.jsonl",
+  "policy_tokenizer": {
+    "path": "gpt2",
+    "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e"
+  },
+  "sentiment_model": {
+    "path": "lvwerra/distilbert-imdb",
+    "revision": "0fc02cd68445b599a9cb2da2368050e7fb31d29a",
+    "padding_side": "right",
+    "positive_label_index": 1
+  },
+  "minority_model": {
+    "path": "mxcui/maxmin-imdb-reward-ALPHA0.75-len512-minority-gpt2",
+    "revision": "e983fa4ca3c684edda3cb11c6d16bb3d73f7c046",
+    "padding_side": "right"
+  },
+  "reward": {
+    "length_source": "scorer",
+    "length_denominator": 512,
+    "scorer_max_length": 512,
+    "text_scope": "prompt_response",
+    "clip_conciseness": true
+  },
+  "sampling": {
+    "max_new_tokens": 256,
+    "max_prompt_tokens": 32,
+    "responses_per_prompt": 4,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": 0
+  },
+  "diagnostic": {
+    "batch_size": 4,
+    "blocks": 4,
+    "early_every": 25,
+    "early_until": 300,
+    "late_every": 100,
+    "shared_scale": 1.0,
+    "cosine_floor": 1e-10
+  },
+  "save_all_rollouts": false,
+  "save_checkpoint_updates": [],
+  "save_final_checkpoint": true,
+  "checkpoints": [],
+  "evaluation_prompts_file": "heldout.jsonl",
+  "gradient_accumulation_steps": 16,
+  "rollout_chunk_size": 4
+}
